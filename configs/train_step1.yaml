@@ -1,0 +1,62 @@
+# Hydra config for step1 pretraining
+
+collapse_strategy: ema_stopgrad
+model_size: tiny
+
+device: auto
+seed: 42
+steps: 200
+batch_size: 8
+
+lr: 1.0e-4
+weight_decay: 0.04
+grad_clip: 1.0
+
+height: 128
+width: 128
+t_bins: 8
+patch_size: 16
+tubelet_size: 2
+
+predictor_depth: 4
+predictor_embed_dim: 384
+predictor_heads: null
+num_mask_tokens: 2
+
+num_events_min: 2000
+num_events_max: 12000
+normalize_voxel: false
+normalize_targets: false
+
+recon_loss: smooth_l1
+
+sigreg_weight: 0.0
+sigreg_knots: 17
+sigreg_proj: 1024
+
+vicreg_std_weight: 0.0
+vicreg_cov_weight: 0.0
+vicreg_eps: 1.0e-4
+vicreg_use_target: false
+
+ema_momentum: 0.996
+
+spatial_mask_min: 0.2
+spatial_mask_max: 0.5
+temporal_mask_min: 0.5
+temporal_mask_max: 1.0
+aspect_min: 0.5
+aspect_max: 2.0
+num_pred_blocks: 1
+max_context_frames_ratio: 1.0
+
+print_every: 10
+save_every: 100
+out_dir: checkpoints/step1_prototype
+
+hydra:
+  run:
+    dir: .
+  output_subdir: null
+  job:
+    chdir: false
