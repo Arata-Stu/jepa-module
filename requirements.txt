@@ -4,3 +4,4 @@ timm>=0.9.16
 einops>=0.7
 hydra-core>=1.3
 omegaconf>=2.3
+tensorboard>=2.14

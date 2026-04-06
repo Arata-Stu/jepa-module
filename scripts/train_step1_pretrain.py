@@ -2,7 +2,7 @@
 """
 Step1 prototype for event-based JEPA pretraining.
 
-- input: event voxel grids from synthetic events (placeholder before real dataloader)
+- input: event voxel grids (`synthetic` or `n_imagenet`)
 - task: masked token prediction at the same timestamp
 - models: JEPA ViT encoder + predictor in `src/jepa`
 - config: Hydra (`configs/train_step1.yaml`)
@@ -10,17 +10,24 @@ Step1 prototype for event-based JEPA pretraining.
 
 from __future__ import annotations
 
+import csv
 import copy
 import random
 import sys
 from pathlib import Path
-from typing import Callable, Dict, Tuple
+from typing import Any, Callable, Dict, Tuple
 
 import hydra
 import torch
+import torch.distributed as dist
 import torch.nn.functional as F
+from torch.nn.parallel import DistributedDataParallel as DDP
 from hydra.utils import to_absolute_path
 from omegaconf import DictConfig, OmegaConf
+try:
+    from torch.utils.tensorboard import SummaryWriter
+except ModuleNotFoundError:
+    SummaryWriter = None  # type: ignore[assignment]
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
@@ -35,10 +42,25 @@ from jepa.models.vision_transformer import (  # noqa: E402
     vit_small,
     vit_tiny,
 )
-from event.representations import VoxelGrid, norm_voxel_grid  # noqa: E402
+from event.representations import VoxelGrid  # noqa: E402
+from event.data import (  # noqa: E402
+    NImageNetVoxelBatchProvider,
+    SyntheticVoxelBatchProvider,
+    ensure_path_exists,
+    resolve_list_file,
+)
 from jepa.masks.multiseq_multiblock3d import _MaskGenerator  # noqa: E402
 from jepa.masks.utils import apply_masks  # noqa: E402
 from jepa.regularizers import SIGReg, VICRegRegularizer  # noqa: E402
+from jepa.utils.distributed import (  # noqa: E402
+    DistributedState,
+    cleanup_distributed,
+    init_distributed,
+    is_main_process,
+    reduce_mean_scalar,
+    unwrap_module,
+)
+from jepa.utils.schedulers import WarmupCosineParamScheduler  # noqa: E402
 
 
 MODEL_SPECS: Dict[str, Dict[str, object]] = {
@@ -51,6 +73,7 @@ MODEL_SPECS: Dict[str, Dict[str, object]] = {
 COLLAPSE_STRATEGY_CHOICES = {"ema_stopgrad", "vicreg", "sigreg"}
 PREDICTOR_DEPTH_CHOICES = {4, 8, 12, 20, 24, 40}
 RECON_LOSS_CHOICES = {"smooth_l1", "mse"}
+DATA_SOURCE_CHOICES = {"synthetic", "n_imagenet"}
 
 def set_seed(seed: int) -> None:
     random.seed(seed)
@@ -59,9 +82,20 @@ def set_seed(seed: int) -> None:
         torch.cuda.manual_seed_all(seed)
 
 
-def select_device(name: str) -> torch.device:
+def select_device(
+    name: str,
+    distributed: bool = False,
+    local_rank: int = 0,
+) -> torch.device:
     if name == "auto":
-        return torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        if torch.cuda.is_available():
+            if distributed:
+                return torch.device(f"cuda:{local_rank}")
+            return torch.device("cuda")
+        return torch.device("cpu")
+
+    if distributed and name == "cuda":
+        return torch.device(f"cuda:{local_rank}")
     return torch.device(name)
 
 
@@ -127,28 +161,277 @@ def build_mask_generator(cfg: DictConfig) -> _MaskGenerator:
     )
 
 
-def sample_voxel_batch(
-    repr_builder: VoxelGrid,
-    batch_size: int,
-    num_events_min: int,
-    num_events_max: int,
-    normalize_voxel: bool,
-) -> torch.Tensor:
-    voxels = []
-    for _ in range(batch_size):
-        n_events = random.randint(num_events_min, num_events_max)
-        x = torch.randint(0, repr_builder.width, (n_events,), dtype=torch.int64)
-        y = torch.randint(0, repr_builder.height, (n_events,), dtype=torch.int64)
-        pol = torch.randint(0, 2, (n_events,), dtype=torch.int64)
-        time = torch.sort(torch.randint(0, 1_000_000, (n_events,), dtype=torch.int64)).values
-        if time[-1] == time[0]:
-            time[-1] = time[0] + 1
-        voxel = repr_builder.convert(x=x, y=y, pol=pol, time=time)
-        if normalize_voxel:
-            voxel = norm_voxel_grid(voxel)
-        voxels.append(voxel)
-    # [B, 1, T, H, W]
-    return torch.stack(voxels, dim=0).unsqueeze(1)
+def build_batch_provider(
+    cfg: DictConfig,
+    voxel_builder: VoxelGrid,
+    dist_state: DistributedState,
+):
+    source = str(cfg.data.source)
+    if source == "synthetic":
+        return SyntheticVoxelBatchProvider(
+            voxel_builder=voxel_builder,
+            batch_size=int(cfg.batch_size),
+            num_events_min=int(cfg.data.synthetic.num_events_min),
+            num_events_max=int(cfg.data.synthetic.num_events_max),
+            normalize_voxel=bool(cfg.normalize_voxel),
+        )
+
+    if source == "n_imagenet":
+        split = str(cfg.data.n_imagenet.split)
+        list_file = resolve_list_file(
+            split=split,
+            train_list=cfg.data.n_imagenet.train_list,
+            val_list=cfg.data.n_imagenet.val_list,
+        )
+        list_file = to_absolute_path(str(list_file))
+        ensure_path_exists(list_file, "N-ImageNet list file")
+
+        root_dir = cfg.data.n_imagenet.root_dir
+        root_dir_abs = None
+        if root_dir:
+            root_dir_abs = to_absolute_path(str(root_dir))
+            ensure_path_exists(root_dir_abs, "N-ImageNet root_dir")
+
+        return NImageNetVoxelBatchProvider(
+            list_file=list_file,
+            split=split,
+            voxel_builder=voxel_builder,
+            batch_size=int(cfg.batch_size),
+            normalize_voxel=bool(cfg.normalize_voxel),
+            num_workers=int(cfg.data.num_workers),
+            pin_memory=bool(cfg.data.pin_memory),
+            drop_last=bool(cfg.data.drop_last),
+            root_dir=root_dir_abs,
+            compressed=bool(cfg.data.n_imagenet.compressed),
+            time_scale=float(cfg.data.n_imagenet.time_scale),
+            limit_samples=cfg.data.n_imagenet.limit_samples,
+            limit_classes=cfg.data.n_imagenet.limit_classes,
+            sensor_height=int(cfg.data.n_imagenet.sensor_height),
+            sensor_width=int(cfg.data.n_imagenet.sensor_width),
+            rescale_to_voxel_grid=bool(cfg.data.n_imagenet.rescale_to_voxel_grid),
+            slice_enabled=bool(cfg.data.n_imagenet.slice.enabled),
+            slice_mode=str(cfg.data.n_imagenet.slice.mode),
+            slice_start=cfg.data.n_imagenet.slice.start,
+            slice_end=cfg.data.n_imagenet.slice.end,
+            slice_length=int(cfg.data.n_imagenet.slice.length),
+            random_slice_on_train=bool(cfg.data.n_imagenet.slice.random_on_train),
+            augment_enabled=bool(cfg.data.n_imagenet.augment.enabled),
+            hflip_prob=float(cfg.data.n_imagenet.augment.hflip_prob),
+            max_shift=int(cfg.data.n_imagenet.augment.max_shift),
+            distributed=dist_state.enabled,
+            rank=dist_state.rank,
+            world_size=dist_state.world_size,
+        )
+
+    raise ValueError(f"Unknown data.source: {source}")
+
+
+def build_eval_batch_provider(
+    cfg: DictConfig,
+    voxel_builder: VoxelGrid,
+    dist_state: DistributedState,
+):
+    if not bool(cfg.eval.enabled):
+        return None
+
+    source = str(cfg.data.source)
+    if source == "synthetic":
+        return SyntheticVoxelBatchProvider(
+            voxel_builder=voxel_builder,
+            batch_size=int(cfg.batch_size),
+            num_events_min=int(cfg.data.synthetic.num_events_min),
+            num_events_max=int(cfg.data.synthetic.num_events_max),
+            normalize_voxel=bool(cfg.normalize_voxel),
+        )
+
+    if source == "n_imagenet":
+        split = str(cfg.eval.split)
+        list_file = resolve_list_file(
+            split=split,
+            train_list=cfg.data.n_imagenet.train_list,
+            val_list=cfg.data.n_imagenet.val_list,
+        )
+        list_file = to_absolute_path(str(list_file))
+        ensure_path_exists(list_file, "N-ImageNet eval list file")
+
+        root_dir = cfg.data.n_imagenet.root_dir
+        root_dir_abs = None
+        if root_dir:
+            root_dir_abs = to_absolute_path(str(root_dir))
+            ensure_path_exists(root_dir_abs, "N-ImageNet root_dir")
+
+        return NImageNetVoxelBatchProvider(
+            list_file=list_file,
+            split=split,
+            voxel_builder=voxel_builder,
+            batch_size=int(cfg.batch_size),
+            normalize_voxel=bool(cfg.normalize_voxel),
+            num_workers=int(cfg.data.num_workers),
+            pin_memory=bool(cfg.data.pin_memory),
+            drop_last=False,
+            root_dir=root_dir_abs,
+            compressed=bool(cfg.data.n_imagenet.compressed),
+            time_scale=float(cfg.data.n_imagenet.time_scale),
+            limit_samples=cfg.data.n_imagenet.limit_samples,
+            limit_classes=cfg.data.n_imagenet.limit_classes,
+            sensor_height=int(cfg.data.n_imagenet.sensor_height),
+            sensor_width=int(cfg.data.n_imagenet.sensor_width),
+            rescale_to_voxel_grid=bool(cfg.data.n_imagenet.rescale_to_voxel_grid),
+            slice_enabled=bool(cfg.data.n_imagenet.slice.enabled),
+            slice_mode=str(cfg.data.n_imagenet.slice.mode),
+            slice_start=cfg.data.n_imagenet.slice.start,
+            slice_end=cfg.data.n_imagenet.slice.end,
+            slice_length=int(cfg.data.n_imagenet.slice.length),
+            random_slice_on_train=False,
+            augment_enabled=False,
+            hflip_prob=0.0,
+            max_shift=0,
+            distributed=dist_state.enabled,
+            rank=dist_state.rank,
+            world_size=dist_state.world_size,
+        )
+
+    raise ValueError(f"Unknown data.source for eval: {source}")
+
+
+def _extract_scalar(x: Any) -> float:
+    if isinstance(x, torch.Tensor):
+        return float(x.detach().item())
+    return float(x)
+
+
+def forward_step(
+    cfg: DictConfig,
+    step: int,
+    inputs: torch.Tensor,
+    encoder: torch.nn.Module,
+    predictor: torch.nn.Module,
+    teacher_encoder: torch.nn.Module | None,
+    mask_generator: _MaskGenerator,
+    collapse_strategy: str,
+    sigreg: SIGReg,
+    vicreg: VICRegRegularizer,
+    sigreg_weight: float,
+    vicreg_std_weight: float,
+    vicreg_cov_weight: float,
+    device: torch.device,
+) -> dict[str, Any]:
+    current_batch_size = int(inputs.shape[0])
+    masks_enc, masks_pred = mask_generator(current_batch_size)
+    masks_enc = masks_enc.to(device=device, non_blocking=True)
+    masks_pred = masks_pred.to(device=device, non_blocking=True)
+
+    if collapse_strategy == "ema_stopgrad":
+        assert teacher_encoder is not None
+        with torch.no_grad():
+            teacher_tokens = teacher_encoder(inputs, training=True)
+            teacher_tokens = apply_masks(teacher_tokens, [masks_pred])
+    else:
+        teacher_tokens = encoder(inputs, training=True)
+        teacher_tokens = apply_masks(teacher_tokens, [masks_pred])
+
+    context_tokens = encoder(inputs, masks=[masks_enc], training=True)
+    pred_tokens, _ = predictor(
+        context_tokens,
+        masks_x=[masks_enc],
+        masks_y=[masks_pred],
+        mod="video",
+        mask_index=step,
+    )
+
+    if bool(cfg.normalize_targets):
+        teacher_tokens = F.layer_norm(teacher_tokens, (teacher_tokens.shape[-1],))
+        pred_tokens = F.layer_norm(pred_tokens, (pred_tokens.shape[-1],))
+
+    if str(cfg.recon_loss) == "smooth_l1":
+        recon_loss = F.smooth_l1_loss(pred_tokens, teacher_tokens)
+    else:
+        recon_loss = F.mse_loss(pred_tokens, teacher_tokens)
+
+    sig_loss = pred_tokens.new_zeros(())
+    if collapse_strategy == "sigreg":
+        # Flatten masked tokens to increase sample count for the sketch test.
+        sig_loss = sigreg(pred_tokens.reshape(1, -1, pred_tokens.shape[-1]))
+
+    std_loss = pred_tokens.new_zeros(())
+    cov_loss = pred_tokens.new_zeros(())
+    if collapse_strategy == "vicreg":
+        vic_y = teacher_tokens if bool(cfg.vicreg_use_target) else None
+        std_loss, cov_loss = vicreg(pred_tokens, vic_y)
+
+    loss = (
+        recon_loss
+        + sigreg_weight * sig_loss
+        + vicreg_std_weight * std_loss
+        + vicreg_cov_weight * cov_loss
+    )
+    return {
+        "loss": loss,
+        "recon_loss": recon_loss,
+        "sig_loss": sig_loss,
+        "std_loss": std_loss,
+        "cov_loss": cov_loss,
+        "batch_size": current_batch_size,
+        "context_tokens": int(masks_enc.shape[1]),
+        "pred_tokens": int(masks_pred.shape[1]),
+    }
+
+
+@torch.no_grad()
+def run_eval(
+    cfg: DictConfig,
+    step: int,
+    device: torch.device,
+    eval_provider: Any,
+    encoder: torch.nn.Module,
+    predictor: torch.nn.Module,
+    teacher_encoder: torch.nn.Module | None,
+    mask_generator: _MaskGenerator,
+    collapse_strategy: str,
+    sigreg: SIGReg,
+    vicreg: VICRegRegularizer,
+    sigreg_weight: float,
+    vicreg_std_weight: float,
+    vicreg_cov_weight: float,
+) -> dict[str, float]:
+    steps = int(cfg.eval.steps)
+    if steps < 1:
+        raise ValueError("eval.steps must be >= 1")
+
+    totals = {
+        "loss": 0.0,
+        "recon_loss": 0.0,
+        "sig_loss": 0.0,
+        "std_loss": 0.0,
+        "cov_loss": 0.0,
+    }
+
+    for i in range(steps):
+        batch = eval_provider.next_batch()
+        inputs = batch["inputs"].to(device, non_blocking=True)
+        metrics = forward_step(
+            cfg=cfg,
+            step=step + i,
+            inputs=inputs,
+            encoder=encoder,
+            predictor=predictor,
+            teacher_encoder=teacher_encoder,
+            mask_generator=mask_generator,
+            collapse_strategy=collapse_strategy,
+            sigreg=sigreg,
+            vicreg=vicreg,
+            sigreg_weight=sigreg_weight,
+            vicreg_std_weight=vicreg_std_weight,
+            vicreg_cov_weight=vicreg_cov_weight,
+            device=device,
+        )
+        totals["loss"] += _extract_scalar(metrics["loss"])
+        totals["recon_loss"] += _extract_scalar(metrics["recon_loss"])
+        totals["sig_loss"] += _extract_scalar(metrics["sig_loss"])
+        totals["std_loss"] += _extract_scalar(metrics["std_loss"])
+        totals["cov_loss"] += _extract_scalar(metrics["cov_loss"])
+
+    return {k: v / steps for k, v in totals.items()}
 
 
 def get_collapse_strategy(cfg: DictConfig) -> str:
@@ -175,13 +458,13 @@ def maybe_validate_cfg(cfg: DictConfig) -> None:
         )
     if str(cfg.recon_loss) not in RECON_LOSS_CHOICES:
         raise ValueError(f"recon_loss must be one of {sorted(RECON_LOSS_CHOICES)}")
+    if str(cfg.data.source) not in DATA_SOURCE_CHOICES:
+        raise ValueError(f"data.source must be one of {sorted(DATA_SOURCE_CHOICES)}")
 
     if int(cfg.height) % int(cfg.patch_size) != 0 or int(cfg.width) % int(cfg.patch_size) != 0:
         raise ValueError("height/width must be divisible by patch-size")
     if int(cfg.t_bins) % int(cfg.tubelet_size) != 0:
         raise ValueError("t-bins must be divisible by tubelet-size")
-    if int(cfg.num_events_min) < 1 or int(cfg.num_events_max) < int(cfg.num_events_min):
-        raise ValueError("num-events range is invalid")
     if float(cfg.sigreg_weight) < 0:
         raise ValueError("sigreg-weight must be >= 0")
     if float(cfg.vicreg_std_weight) < 0 or float(cfg.vicreg_cov_weight) < 0:
@@ -194,6 +477,63 @@ def maybe_validate_cfg(cfg: DictConfig) -> None:
         raise ValueError("sigreg-knots must be >= 2")
     if int(cfg.sigreg_proj) < 1:
         raise ValueError("sigreg-proj must be >= 1")
+    if int(cfg.batch_size) < 1:
+        raise ValueError("batch_size must be >= 1")
+
+    if str(cfg.data.source) == "synthetic":
+        if int(cfg.data.synthetic.num_events_min) < 1:
+            raise ValueError("data.synthetic.num_events_min must be >= 1")
+        if int(cfg.data.synthetic.num_events_max) < int(cfg.data.synthetic.num_events_min):
+            raise ValueError(
+                "data.synthetic.num_events_max must be >= data.synthetic.num_events_min"
+            )
+
+    if str(cfg.data.source) == "n_imagenet":
+        if str(cfg.data.n_imagenet.split) not in {"train", "val", "test"}:
+            raise ValueError("data.n_imagenet.split must be train|val|test")
+        if int(cfg.data.n_imagenet.sensor_height) < 1 or int(cfg.data.n_imagenet.sensor_width) < 1:
+            raise ValueError("data.n_imagenet.sensor_height/width must be >= 1")
+        if int(cfg.data.num_workers) < 0:
+            raise ValueError("data.num_workers must be >= 0")
+        if str(cfg.data.n_imagenet.slice.mode) not in {"idx", "time", "random"}:
+            raise ValueError("data.n_imagenet.slice.mode must be idx|time|random")
+        if int(cfg.data.n_imagenet.slice.length) < 1:
+            raise ValueError("data.n_imagenet.slice.length must be >= 1")
+        if not (0.0 <= float(cfg.data.n_imagenet.augment.hflip_prob) <= 1.0):
+            raise ValueError("data.n_imagenet.augment.hflip_prob must be in [0, 1]")
+        if int(cfg.data.n_imagenet.augment.max_shift) < 0:
+            raise ValueError("data.n_imagenet.augment.max_shift must be >= 0")
+
+    if bool(cfg.eval.enabled):
+        if int(cfg.eval.every) < 1:
+            raise ValueError("eval.every must be >= 1")
+        if int(cfg.eval.steps) < 1:
+            raise ValueError("eval.steps must be >= 1")
+        if str(cfg.data.source) == "n_imagenet" and str(cfg.eval.split) not in {"val", "test", "train"}:
+            raise ValueError("eval.split must be train|val|test")
+
+    if bool(cfg.logging.tensorboard.enabled) and SummaryWriter is None:
+        raise ModuleNotFoundError(
+            "TensorBoard is not available. Install `tensorboard` (see requirements.txt)."
+        )
+
+    if bool(cfg.scheduler.enabled):
+        if int(cfg.scheduler.warmup_steps) < 0:
+            raise ValueError("scheduler.warmup_steps must be >= 0")
+        if float(cfg.scheduler.final_lr) < 0:
+            raise ValueError("scheduler.final_lr must be >= 0")
+        if float(cfg.scheduler.start_lr) < 0:
+            raise ValueError("scheduler.start_lr must be >= 0")
+        if bool(cfg.scheduler.update_weight_decay) and float(cfg.scheduler.final_weight_decay) < 0:
+            raise ValueError("scheduler.final_weight_decay must be >= 0")
+
+    if bool(cfg.distributed.enabled):
+        if str(cfg.distributed.backend) not in {"auto", "nccl", "gloo"}:
+            raise ValueError("distributed.backend must be auto|nccl|gloo")
+        if int(cfg.distributed.port) < 1:
+            raise ValueError("distributed.port must be >= 1")
+        if int(cfg.distributed.timeout_sec) < 1:
+            raise ValueError("distributed.timeout_sec must be >= 1")
 
 
 def _set_requires_grad(module: torch.nn.Module, requires_grad: bool) -> None:
@@ -215,24 +555,76 @@ def _update_ema(
 def main(cfg: DictConfig) -> None:
     maybe_validate_cfg(cfg)
     collapse_strategy = get_collapse_strategy(cfg)
-    set_seed(int(cfg.seed))
-    device = select_device(str(cfg.device))
+    dist_state = init_distributed(
+        enabled=bool(cfg.distributed.enabled),
+        backend=str(cfg.distributed.backend),
+        port=int(cfg.distributed.port),
+        timeout_sec=int(cfg.distributed.timeout_sec),
+    )
+    main_process = is_main_process(dist_state)
+
+    set_seed(int(cfg.seed) + (dist_state.rank if dist_state.enabled else 0))
+    device = select_device(
+        str(cfg.device),
+        distributed=dist_state.enabled,
+        local_rank=dist_state.local_rank,
+    )
+    if dist_state.enabled and device.type == "cuda":
+        torch.cuda.set_device(device)
 
     encoder, predictor = build_models(cfg)
     encoder.to(device)
     predictor.to(device)
     encoder.train()
     predictor.train()
+
+    if dist_state.enabled:
+        ddp_kwargs: dict[str, Any] = {
+            "broadcast_buffers": bool(cfg.distributed.broadcast_buffers),
+            "find_unused_parameters": bool(cfg.distributed.find_unused_parameters),
+        }
+        if device.type == "cuda":
+            assert device.index is not None
+            ddp_kwargs["device_ids"] = [device.index]
+            ddp_kwargs["output_device"] = device.index
+        encoder = DDP(encoder, **ddp_kwargs)
+        predictor = DDP(predictor, **ddp_kwargs)
+
     teacher_encoder: torch.nn.Module | None = None
     if collapse_strategy == "ema_stopgrad":
-        teacher_encoder = copy.deepcopy(encoder).to(device)
+        teacher_encoder = copy.deepcopy(unwrap_module(encoder)).to(device)
         teacher_encoder.eval()
         _set_requires_grad(teacher_encoder, False)
 
     params = list(encoder.parameters()) + list(predictor.parameters())
     optimizer = torch.optim.AdamW(
-        params, lr=float(cfg.lr), weight_decay=float(cfg.weight_decay)
+        params,
+        lr=float(cfg.lr),
+        weight_decay=float(cfg.weight_decay),
     )
+    lr_scheduler = None
+    wd_scheduler = None
+    if bool(cfg.scheduler.enabled):
+        lr_scheduler = WarmupCosineParamScheduler(
+            optimizer=optimizer,
+            param_name="lr",
+            base_value=float(cfg.lr),
+            final_value=float(cfg.scheduler.final_lr),
+            total_steps=int(cfg.steps),
+            warmup_steps=int(cfg.scheduler.warmup_steps),
+            start_value=float(cfg.scheduler.start_lr),
+        )
+        if bool(cfg.scheduler.update_weight_decay):
+            wd_scheduler = WarmupCosineParamScheduler(
+                optimizer=optimizer,
+                param_name="weight_decay",
+                base_value=float(cfg.weight_decay),
+                final_value=float(cfg.scheduler.final_weight_decay),
+                total_steps=int(cfg.steps),
+                warmup_steps=0,
+                start_value=float(cfg.weight_decay),
+            )
+
     sigreg = SIGReg(knots=int(cfg.sigreg_knots), num_proj=int(cfg.sigreg_proj)).to(device)
     vicreg = VICRegRegularizer(eps=float(cfg.vicreg_eps)).to(device)
 
@@ -251,110 +643,276 @@ def main(cfg: DictConfig) -> None:
 
     mask_generator = build_mask_generator(cfg)
     voxel_builder = VoxelGrid(
-        channels=int(cfg.t_bins), height=int(cfg.height), width=int(cfg.width)
+        channels=int(cfg.t_bins),
+        height=int(cfg.height),
+        width=int(cfg.width),
     )
+    batch_provider = build_batch_provider(cfg, voxel_builder, dist_state=dist_state)
+    eval_provider = build_eval_batch_provider(cfg, voxel_builder, dist_state=dist_state)
+    dataset_samples = getattr(batch_provider, "num_samples", None)
+    eval_dataset_samples = getattr(eval_provider, "num_samples", None)
 
     out_dir = Path(to_absolute_path(str(cfg.out_dir)))
     out_dir.mkdir(parents=True, exist_ok=True)
+    log_dir = Path(to_absolute_path(str(cfg.log_dir)))
+    log_dir.mkdir(parents=True, exist_ok=True)
+    metrics_file = Path(to_absolute_path(str(cfg.metrics_file)))
+    metrics_file.parent.mkdir(parents=True, exist_ok=True)
 
-    print(
-        f"device={device} model={cfg.model_size} collapse_strategy={collapse_strategy} "
-        f"encoder_params={count_trainable_params(encoder):,} "
-        f"predictor_params={count_trainable_params(predictor):,}"
-    )
+    tensorboard_writer = None
+    tensorboard_dir = None
+    if main_process and bool(cfg.logging.tensorboard.enabled):
+        tensorboard_dir = log_dir / str(cfg.logging.tensorboard.subdir)
+        tensorboard_dir.mkdir(parents=True, exist_ok=True)
+        assert SummaryWriter is not None
+        tensorboard_writer = SummaryWriter(log_dir=str(tensorboard_dir))
+        tensorboard_writer.add_text("run/config", OmegaConf.to_yaml(cfg), 0)
 
-    for step in range(1, int(cfg.steps) + 1):
-        optimizer.zero_grad(set_to_none=True)
-        inputs = sample_voxel_batch(
-            repr_builder=voxel_builder,
-            batch_size=int(cfg.batch_size),
-            num_events_min=int(cfg.num_events_min),
-            num_events_max=int(cfg.num_events_max),
-            normalize_voxel=bool(cfg.normalize_voxel),
-        ).to(device)
-
-        masks_enc, masks_pred = mask_generator(int(cfg.batch_size))
-        masks_enc = masks_enc.to(device=device, non_blocking=True)
-        masks_pred = masks_pred.to(device=device, non_blocking=True)
-
-        if collapse_strategy == "ema_stopgrad":
-            assert teacher_encoder is not None
-            with torch.no_grad():
-                teacher_tokens = teacher_encoder(inputs, training=True)
-                teacher_tokens = apply_masks(teacher_tokens, [masks_pred])
-        else:
-            teacher_tokens = encoder(inputs, training=True)
-            teacher_tokens = apply_masks(teacher_tokens, [masks_pred])
-
-        context_tokens = encoder(inputs, masks=[masks_enc], training=True)
-        pred_tokens, _ = predictor(
-            context_tokens,
-            masks_x=[masks_enc],
-            masks_y=[masks_pred],
-            mod="video",
-            mask_index=step,
+    metrics_fp = None
+    metrics_writer = None
+    eval_metrics_fp = None
+    eval_metrics_writer = None
+    if main_process:
+        metrics_fp = metrics_file.open("w", newline="", encoding="utf-8")
+        metrics_writer = csv.writer(metrics_fp)
+        metrics_writer.writerow(
+            [
+                "step",
+                "batch_size",
+                "loss",
+                "recon",
+                "sig",
+                "std",
+                "cov",
+                "lr",
+                "weight_decay",
+                "context_tokens",
+                "pred_tokens",
+            ]
         )
-
-        if bool(cfg.normalize_targets):
-            teacher_tokens = F.layer_norm(teacher_tokens, (teacher_tokens.shape[-1],))
-            pred_tokens = F.layer_norm(pred_tokens, (pred_tokens.shape[-1],))
-
-        if str(cfg.recon_loss) == "smooth_l1":
-            recon_loss = F.smooth_l1_loss(pred_tokens, teacher_tokens)
-        else:
-            recon_loss = F.mse_loss(pred_tokens, teacher_tokens)
-
-        sig_loss = pred_tokens.new_zeros(())
-        if collapse_strategy == "sigreg":
-            # Flatten masked tokens to increase sample count for the sketch test.
-            sig_loss = sigreg(pred_tokens.reshape(1, -1, pred_tokens.shape[-1]))
-
-        std_loss = pred_tokens.new_zeros(())
-        cov_loss = pred_tokens.new_zeros(())
-        if collapse_strategy == "vicreg":
-            vic_y = teacher_tokens if bool(cfg.vicreg_use_target) else None
-            std_loss, cov_loss = vicreg(pred_tokens, vic_y)
-
-        loss = (
-            recon_loss
-            + sigreg_weight * sig_loss
-            + vicreg_std_weight * std_loss
-            + vicreg_cov_weight * cov_loss
-        )
-
-        loss.backward()
-        if float(cfg.grad_clip) > 0:
-            torch.nn.utils.clip_grad_norm_(params, float(cfg.grad_clip))
-        optimizer.step()
-        if teacher_encoder is not None:
-            _update_ema(encoder, teacher_encoder, float(cfg.ema_momentum))
-
-        if step % int(cfg.print_every) == 0 or step == 1:
-            print(
-                f"step={step:05d}/{int(cfg.steps):05d} "
-                f"loss={loss.item():.6f} "
-                f"recon={recon_loss.item():.6f} "
-                f"sig={sig_loss.item():.6f} "
-                f"std={std_loss.item():.6f} "
-                f"cov={cov_loss.item():.6f} "
-                f"context_tokens={masks_enc.shape[1]} pred_tokens={masks_pred.shape[1]}"
+        if eval_provider is not None:
+            eval_metrics_file = log_dir / "eval_metrics.csv"
+            eval_metrics_fp = eval_metrics_file.open("w", newline="", encoding="utf-8")
+            eval_metrics_writer = csv.writer(eval_metrics_fp)
+            eval_metrics_writer.writerow(
+                ["step", "loss", "recon", "sig", "std", "cov", "eval_steps"]
             )
 
-        if int(cfg.save_every) > 0 and step % int(cfg.save_every) == 0:
-            ckpt_path = out_dir / f"step_{step:06d}.pt"
-            torch.save(
-                {
-                    "step": step,
-                    "cfg": OmegaConf.to_container(cfg, resolve=True),
-                    "encoder": encoder.state_dict(),
-                    "predictor": predictor.state_dict(),
-                    "optimizer": optimizer.state_dict(),
-                },
-                ckpt_path,
-            )
-            print(f"saved={ckpt_path}")
+    if main_process:
+        print(
+            f"device={device} model={cfg.model_size} "
+            f"data_source={cfg.data.source} collapse_strategy={collapse_strategy} "
+            f"rank={dist_state.rank}/{dist_state.world_size} backend={dist_state.backend} "
+            f"encoder_params={count_trainable_params(unwrap_module(encoder)):,} "
+            f"predictor_params={count_trainable_params(unwrap_module(predictor)):,} "
+            f"dataset_samples={dataset_samples if dataset_samples is not None else 'n/a'} "
+            f"eval_dataset_samples={eval_dataset_samples if eval_dataset_samples is not None else 'n/a'} "
+            f"log_dir={log_dir} ckpt_dir={out_dir} metrics_file={metrics_file} "
+            f"tensorboard_dir={tensorboard_dir if tensorboard_dir is not None else 'disabled'}"
+        )
 
-    print("finished")
+    try:
+        for step in range(1, int(cfg.steps) + 1):
+            step_lr = (
+                float(lr_scheduler.step(step))
+                if lr_scheduler is not None
+                else float(optimizer.param_groups[0]["lr"])
+            )
+            step_wd = (
+                float(wd_scheduler.step(step))
+                if wd_scheduler is not None
+                else float(optimizer.param_groups[0].get("weight_decay", 0.0))
+            )
+
+            optimizer.zero_grad(set_to_none=True)
+            batch = batch_provider.next_batch()
+            inputs = batch["inputs"].to(device, non_blocking=True)
+            step_metrics = forward_step(
+                cfg=cfg,
+                step=step,
+                inputs=inputs,
+                encoder=encoder,
+                predictor=predictor,
+                teacher_encoder=teacher_encoder,
+                mask_generator=mask_generator,
+                collapse_strategy=collapse_strategy,
+                sigreg=sigreg,
+                vicreg=vicreg,
+                sigreg_weight=sigreg_weight,
+                vicreg_std_weight=vicreg_std_weight,
+                vicreg_cov_weight=vicreg_cov_weight,
+                device=device,
+            )
+
+            loss = step_metrics["loss"]
+            assert isinstance(loss, torch.Tensor)
+            loss.backward()
+            if float(cfg.grad_clip) > 0:
+                torch.nn.utils.clip_grad_norm_(params, float(cfg.grad_clip))
+            optimizer.step()
+            if teacher_encoder is not None:
+                _update_ema(
+                    unwrap_module(encoder),
+                    teacher_encoder,
+                    float(cfg.ema_momentum),
+                )
+
+            step_loss = _extract_scalar(step_metrics["loss"])
+            step_recon = _extract_scalar(step_metrics["recon_loss"])
+            step_sig = _extract_scalar(step_metrics["sig_loss"])
+            step_std = _extract_scalar(step_metrics["std_loss"])
+            step_cov = _extract_scalar(step_metrics["cov_loss"])
+            step_batch_size = int(step_metrics["batch_size"])
+            step_context_tokens = float(step_metrics["context_tokens"])
+            step_pred_tokens = float(step_metrics["pred_tokens"])
+
+            if dist_state.enabled:
+                step_loss = reduce_mean_scalar(step_loss, device=device)
+                step_recon = reduce_mean_scalar(step_recon, device=device)
+                step_sig = reduce_mean_scalar(step_sig, device=device)
+                step_std = reduce_mean_scalar(step_std, device=device)
+                step_cov = reduce_mean_scalar(step_cov, device=device)
+                step_batch_size = int(reduce_mean_scalar(float(step_batch_size), device=device))
+                step_context_tokens = reduce_mean_scalar(step_context_tokens, device=device)
+                step_pred_tokens = reduce_mean_scalar(step_pred_tokens, device=device)
+
+            if main_process and metrics_writer is not None and metrics_fp is not None:
+                metrics_writer.writerow(
+                    [
+                        step,
+                        step_batch_size,
+                        f"{step_loss:.8f}",
+                        f"{step_recon:.8f}",
+                        f"{step_sig:.8f}",
+                        f"{step_std:.8f}",
+                        f"{step_cov:.8f}",
+                        f"{step_lr:.10f}",
+                        f"{step_wd:.10f}",
+                        int(round(step_context_tokens)),
+                        int(round(step_pred_tokens)),
+                    ]
+                )
+                metrics_fp.flush()
+
+            if tensorboard_writer is not None:
+                tensorboard_writer.add_scalar("train/loss", step_loss, step)
+                tensorboard_writer.add_scalar("train/recon", step_recon, step)
+                tensorboard_writer.add_scalar("train/sig", step_sig, step)
+                tensorboard_writer.add_scalar("train/std", step_std, step)
+                tensorboard_writer.add_scalar("train/cov", step_cov, step)
+                tensorboard_writer.add_scalar("train/lr", step_lr, step)
+                tensorboard_writer.add_scalar("train/weight_decay", step_wd, step)
+                tensorboard_writer.add_scalar(
+                    "train/context_tokens",
+                    int(round(step_context_tokens)),
+                    step,
+                )
+                tensorboard_writer.add_scalar(
+                    "train/pred_tokens",
+                    int(round(step_pred_tokens)),
+                    step,
+                )
+
+            if main_process and (step % int(cfg.print_every) == 0 or step == 1):
+                print(
+                    f"step={step:05d}/{int(cfg.steps):05d} "
+                    f"loss={step_loss:.6f} "
+                    f"recon={step_recon:.6f} "
+                    f"sig={step_sig:.6f} "
+                    f"std={step_std:.6f} "
+                    f"cov={step_cov:.6f} "
+                    f"lr={step_lr:.8f} "
+                    f"wd={step_wd:.8f} "
+                    f"context_tokens={int(round(step_context_tokens))} "
+                    f"pred_tokens={int(round(step_pred_tokens))}"
+                )
+
+            if eval_provider is not None and step % int(cfg.eval.every) == 0:
+                encoder.eval()
+                predictor.eval()
+                if teacher_encoder is not None:
+                    teacher_encoder.eval()
+                eval_stats = run_eval(
+                    cfg=cfg,
+                    step=step,
+                    device=device,
+                    eval_provider=eval_provider,
+                    encoder=encoder,
+                    predictor=predictor,
+                    teacher_encoder=teacher_encoder,
+                    mask_generator=mask_generator,
+                    collapse_strategy=collapse_strategy,
+                    sigreg=sigreg,
+                    vicreg=vicreg,
+                    sigreg_weight=sigreg_weight,
+                    vicreg_std_weight=vicreg_std_weight,
+                    vicreg_cov_weight=vicreg_cov_weight,
+                )
+                encoder.train()
+                predictor.train()
+
+                if dist_state.enabled:
+                    eval_stats = {
+                        k: reduce_mean_scalar(v, device=device)
+                        for k, v in eval_stats.items()
+                    }
+
+                if main_process and eval_metrics_writer is not None and eval_metrics_fp is not None:
+                    eval_metrics_writer.writerow(
+                        [
+                            step,
+                            f"{eval_stats['loss']:.8f}",
+                            f"{eval_stats['recon_loss']:.8f}",
+                            f"{eval_stats['sig_loss']:.8f}",
+                            f"{eval_stats['std_loss']:.8f}",
+                            f"{eval_stats['cov_loss']:.8f}",
+                            int(cfg.eval.steps),
+                        ]
+                    )
+                    eval_metrics_fp.flush()
+
+                if tensorboard_writer is not None:
+                    tensorboard_writer.add_scalar("eval/loss", eval_stats["loss"], step)
+                    tensorboard_writer.add_scalar("eval/recon", eval_stats["recon_loss"], step)
+                    tensorboard_writer.add_scalar("eval/sig", eval_stats["sig_loss"], step)
+                    tensorboard_writer.add_scalar("eval/std", eval_stats["std_loss"], step)
+                    tensorboard_writer.add_scalar("eval/cov", eval_stats["cov_loss"], step)
+
+                if main_process:
+                    print(
+                        f"eval@step={step:05d} "
+                        f"loss={eval_stats['loss']:.6f} "
+                        f"recon={eval_stats['recon_loss']:.6f}"
+                    )
+
+            if main_process and int(cfg.save_every) > 0 and step % int(cfg.save_every) == 0:
+                ckpt_path = out_dir / f"step_{step:06d}.pt"
+                torch.save(
+                    {
+                        "step": step,
+                        "cfg": OmegaConf.to_container(cfg, resolve=True),
+                        "encoder": unwrap_module(encoder).state_dict(),
+                        "predictor": unwrap_module(predictor).state_dict(),
+                        "optimizer": optimizer.state_dict(),
+                    },
+                    ckpt_path,
+                )
+                print(f"saved={ckpt_path}")
+    finally:
+        if metrics_fp is not None:
+            metrics_fp.close()
+        if eval_metrics_fp is not None:
+            eval_metrics_fp.close()
+        if tensorboard_writer is not None:
+            tensorboard_writer.flush()
+            tensorboard_writer.close()
+        if dist_state.enabled:
+            if dist.is_available() and dist.is_initialized():
+                dist.barrier()
+            cleanup_distributed()
+
+    if main_process:
+        print("finished")
 
 
 if __name__ == "__main__":

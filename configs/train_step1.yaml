@@ -23,8 +23,6 @@ predictor_embed_dim: 384
 predictor_heads: null
 num_mask_tokens: 2
 
-num_events_min: 2000
-num_events_max: 12000
 normalize_voxel: false
 normalize_targets: false
 
@@ -52,11 +50,73 @@ max_context_frames_ratio: 1.0
 
 print_every: 10
 save_every: 100
-out_dir: checkpoints/step1_prototype
+out_dir: ${hydra:runtime.output_dir}/checkpoints
+log_dir: ${hydra:runtime.output_dir}/logs
+metrics_file: ${hydra:runtime.output_dir}/logs/train_metrics.csv
+
+logging:
+  tensorboard:
+    enabled: true
+    subdir: tensorboard
+
+eval:
+  enabled: false
+  every: 100
+  steps: 10
+  split: val  # train | val | test
+
+scheduler:
+  enabled: false
+  warmup_steps: 0
+  start_lr: 0.0
+  final_lr: 1.0e-6
+  update_weight_decay: false
+  final_weight_decay: ${weight_decay}
+
+distributed:
+  enabled: false
+  backend: auto  # auto | nccl | gloo
+  port: 37129
+  timeout_sec: 1800
+  broadcast_buffers: false
+  find_unused_parameters: false
+
+data:
+  source: synthetic  # synthetic | n_imagenet
+  num_workers: 4
+  pin_memory: true
+  drop_last: true
+
+  synthetic:
+    num_events_min: 2000
+    num_events_max: 12000
+
+  n_imagenet:
+    split: train  # train | val | test
+    train_list: null
+    val_list: null
+    root_dir: null
+    compressed: true
+    time_scale: 1000000.0
+    limit_samples: null
+    limit_classes: null
+    sensor_height: 480
+    sensor_width: 640
+    rescale_to_voxel_grid: true
+
+    slice:
+      enabled: false
+      mode: random  # idx | time | random
+      start: null
+      end: null
+      length: 30000
+      random_on_train: true
+
+    augment:
+      enabled: false
+      hflip_prob: 0.5
+      max_shift: 20
 
 hydra:
   run:
-    dir: .
-  output_subdir: null
-  job:
-    chdir: false
+    dir: ./outputs/train/${now:%Y-%m-%d}/${now:%H-%M-%S}
