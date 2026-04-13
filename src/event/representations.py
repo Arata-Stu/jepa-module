@@ -24,11 +24,11 @@ class EventRepresentation:
 
 
 class VoxelGrid(EventRepresentation):
-    def __init__(self, channels: int, height: int, width: int):
-        assert channels > 1
+    def __init__(self, time_bins: int, height: int, width: int):
+        assert time_bins > 1
         assert height > 1
         assert width > 1
-        self.nb_channels = channels
+        self.time_bins = time_bins
         self.height = height
         self.width = width
 
@@ -40,22 +40,22 @@ class VoxelGrid(EventRepresentation):
 
     def _construct_empty_voxel_grid(self):
         return torch.zeros(
-            (self.nb_channels, self.height, self.width),
+            (self.time_bins, self.height, self.width),
             dtype=torch.float,
             requires_grad=False,
             device=torch.device('cpu'))
 
     def _get_dt(self, t0_center: int, t1_center: int):
         assert t1_center > t0_center
-        return (t1_center - t0_center)/(self.nb_channels - 1)
+        return (t1_center - t0_center)/(self.time_bins - 1)
 
     def _normalize_time(self, time: torch.Tensor, t0_center: int, t1_center: int):
         # time_norm < t0_center will be negative
         # time_norm == t0_center is 0
         # time_norm > t0_center is positive
-        # time_norm == t1_center is (nb_channels - 1)
-        # time_norm > t1_center is greater than (nb_channels - 1)
-        return (time - t0_center)/(t1_center - t0_center)*(self.nb_channels - 1)
+        # time_norm == t1_center is (time_bins - 1)
+        # time_norm > t1_center is greater than (time_bins - 1)
+        return (time - t0_center)/(t1_center - t0_center)*(self.time_bins - 1)
 
     @staticmethod
     def _is_int_tensor(tensor: torch.Tensor) -> bool:
@@ -73,7 +73,7 @@ class VoxelGrid(EventRepresentation):
             assert self._is_int_tensor(y)
 
         voxel_grid = self._construct_empty_voxel_grid()
-        ch, ht, wd = self.nb_channels, self.height, self.width
+        ch, ht, wd = self.time_bins, self.height, self.width
         with torch.no_grad():
             t0_center = t0_center if t0_center is not None else time[0]
             t1_center = t1_center if t1_center is not None else time[-1]
