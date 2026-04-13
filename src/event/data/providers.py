@@ -33,8 +33,7 @@ class SyntheticVoxelBatchProvider:
         y = torch.randint(0, self.voxel_builder.height, (n_events,), dtype=torch.int64)
         pol = torch.randint(0, 2, (n_events,), dtype=torch.int64)
         time = torch.sort(torch.randint(0, 1_000_000, (n_events,), dtype=torch.int64)).values
-
-        if time[-1] <= time[0]:
+        if self.voxel_builder.time_bins > 1 and time[-1] <= time[0]:
             if time.numel() == 1:
                 x = torch.cat([x, x], dim=0)
                 y = torch.cat([y, y], dim=0)

@@ -24,13 +24,31 @@ class EventRepresentation:
 
 
 class VoxelGrid(EventRepresentation):
-    def __init__(self, time_bins: int, height: int, width: int):
-        assert time_bins > 1
-        assert height > 1
-        assert width > 1
-        self.time_bins = time_bins
-        self.height = height
-        self.width = width
+    def __init__(
+        self,
+        time_bins: Optional[int]=None,
+        height: Optional[int]=None,
+        width: Optional[int]=None,
+        *,
+        channels: Optional[int]=None,
+    ):
+        if time_bins is None:
+            time_bins = channels
+        elif channels is not None and int(time_bins) != int(channels):
+            raise ValueError("time_bins and channels must match when both are provided")
+
+        if time_bins is None:
+            raise ValueError("time_bins (or channels) must be provided")
+        if height is None or width is None:
+            raise ValueError("height and width must be provided")
+
+        assert int(time_bins) >= 1
+        assert int(height) > 1
+        assert int(width) > 1
+        self.time_bins = int(time_bins)
+        self.nb_channels = self.time_bins
+        self.height = int(height)
+        self.width = int(width)
 
     def get_extended_time_window(self, t0_center: int, t1_center: int):
         dt = self._get_dt(t0_center, t1_center)
@@ -46,10 +64,14 @@ class VoxelGrid(EventRepresentation):
             device=torch.device('cpu'))
 
     def _get_dt(self, t0_center: int, t1_center: int):
+        if self.time_bins == 1:
+            return 0.0
         assert t1_center > t0_center
         return (t1_center - t0_center)/(self.time_bins - 1)
 
     def _normalize_time(self, time: torch.Tensor, t0_center: int, t1_center: int):
+        if self.time_bins == 1:
+            return torch.zeros_like(time, dtype=torch.float32)
         # time_norm < t0_center will be negative
         # time_norm == t0_center is 0
         # time_norm > t0_center is positive
@@ -75,16 +97,33 @@ class VoxelGrid(EventRepresentation):
         voxel_grid = self._construct_empty_voxel_grid()
         ch, ht, wd = self.time_bins, self.height, self.width
         with torch.no_grad():
+            value = 2*pol.float()-1
+
+            if ch == 1:
+                if is_int_xy:
+                    mask = (x >= 0) & (x < wd) & (y >= 0) & (y < ht)
+                    index = wd * y.long() + x.long()
+                    voxel_grid[0].put_(index[mask], value[mask], accumulate=True)
+                else:
+                    x0 = x.floor().int()
+                    y0 = y.floor().int()
+                    for xlim in [x0, x0+1]:
+                        for ylim in [y0, y0+1]:
+                            mask = (xlim < wd) & (xlim >= 0) & (ylim < ht) & (ylim >= 0)
+                            interp_weights = value * (1 - (xlim - x).abs()) * (1 - (ylim - y).abs())
+                            index = wd * ylim.long() + xlim.long()
+                            voxel_grid[0].put_(index[mask], interp_weights[mask], accumulate=True)
+                return voxel_grid
+
             t0_center = t0_center if t0_center is not None else time[0]
             t1_center = t1_center if t1_center is not None else time[-1]
             t_norm = self._normalize_time(time, t0_center, t1_center)
 
             t0 = t_norm.floor().int()
-            value = 2*pol.float()-1
 
             if is_int_xy:
                 for tlim in [t0,t0+1]:
-                    mask = (tlim >= 0) & (tlim < ch)
+                    mask = (x >= 0) & (x < wd) & (y >= 0) & (y < ht) & (tlim >= 0) & (tlim < ch)
                     interp_weights = value * (1 - (tlim - t_norm).abs())
 
                     index = ht * wd * tlim.long() + \

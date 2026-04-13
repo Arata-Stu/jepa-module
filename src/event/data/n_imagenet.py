@@ -270,15 +270,15 @@ class NImageNetVoxelCollator:
                 (self.voxel_builder.nb_channels, self.voxel_builder.height, self.voxel_builder.width),
                 dtype=torch.float32,
             )
-
-        if time.numel() == 1:
-            x = torch.cat([x, x], dim=0)
-            y = torch.cat([y, y], dim=0)
-            pol = torch.cat([pol, pol], dim=0)
-            time = torch.cat([time, time + 1], dim=0)
-        elif time[-1] <= time[0]:
-            time = time.clone()
-            time[-1] = time[0] + 1
+        if self.voxel_builder.time_bins > 1:
+            if time.numel() == 1:
+                x = torch.cat([x, x], dim=0)
+                y = torch.cat([y, y], dim=0)
+                pol = torch.cat([pol, pol], dim=0)
+                time = torch.cat([time, time + 1], dim=0)
+            elif time[-1] <= time[0]:
+                time = time.clone()
+                time[-1] = time[0] + 1
 
         voxel = self.voxel_builder.convert(x=x, y=y, pol=pol, time=time)
         if self.normalize_voxel:
