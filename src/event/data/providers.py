@@ -8,6 +8,7 @@ import torch
 from torch.utils.data import DataLoader
 from torch.utils.data.distributed import DistributedSampler
 
+from event.data.dsec import DSECEventsDataset, DSECVoxelCollator
 from event.data.n_imagenet import NImageNetEventsDataset, NImageNetVoxelCollator
 from event.representations import VoxelGrid, norm_voxel_grid
 
@@ -112,6 +113,100 @@ class NImageNetVoxelBatchProvider:
         )
 
         collator = NImageNetVoxelCollator(
+            voxel_builder=voxel_builder,
+            normalize_voxel=normalize_voxel,
+            sensor_height=sensor_height,
+            sensor_width=sensor_width,
+            rescale_to_voxel_grid=rescale_to_voxel_grid,
+        )
+
+        self.sampler = None
+        if distributed and world_size > 1:
+            self.sampler = DistributedSampler(
+                self.dataset,
+                num_replicas=world_size,
+                rank=rank,
+                shuffle=(split == "train"),
+                drop_last=drop_last,
+            )
+
+        self.loader = DataLoader(
+            self.dataset,
+            batch_size=batch_size,
+            shuffle=(split == "train") and self.sampler is None,
+            num_workers=num_workers,
+            pin_memory=pin_memory,
+            drop_last=drop_last,
+            collate_fn=collator,
+            sampler=self.sampler,
+        )
+        self._sampler_epoch = 0
+        if self.sampler is not None:
+            self.sampler.set_epoch(self._sampler_epoch)
+        self._iter = iter(self.loader)
+
+    def next_batch(self) -> dict[str, Any]:
+        try:
+            batch = next(self._iter)
+        except StopIteration:
+            if self.sampler is not None:
+                self._sampler_epoch += 1
+                self.sampler.set_epoch(self._sampler_epoch)
+            self._iter = iter(self.loader)
+            batch = next(self._iter)
+        return batch
+
+    @property
+    def num_samples(self) -> int:
+        return len(self.dataset)
+
+
+class DSECVoxelBatchProvider:
+    def __init__(
+        self,
+        root_dir: str,
+        split: str,
+        voxel_builder: VoxelGrid,
+        batch_size: int,
+        normalize_voxel: bool,
+        num_workers: int,
+        pin_memory: bool,
+        drop_last: bool,
+        split_config: str | None,
+        sync: str,
+        image_view: str,
+        load_events: bool,
+        load_rgb: bool,
+        load_labels: bool,
+        limit_samples: int | None,
+        sensor_height: int,
+        sensor_width: int,
+        rescale_to_voxel_grid: bool,
+        distributed: bool = False,
+        rank: int = 0,
+        world_size: int = 1,
+    ):
+        if not load_events:
+            raise ValueError(
+                "DSECVoxelBatchProvider requires load_events=true "
+                "because it builds voxel inputs from events."
+            )
+
+        self.dataset = DSECEventsDataset(
+            root_dir=root_dir,
+            split=split,
+            sync=sync,
+            split_config=split_config,
+            image_view=image_view,
+            load_events=load_events,
+            load_rgb=load_rgb,
+            load_labels=load_labels,
+            limit_samples=limit_samples,
+            sensor_height=sensor_height,
+            sensor_width=sensor_width,
+        )
+
+        collator = DSECVoxelCollator(
             voxel_builder=voxel_builder,
             normalize_voxel=normalize_voxel,
             sensor_height=sensor_height,

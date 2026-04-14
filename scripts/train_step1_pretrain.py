@@ -44,6 +44,7 @@ from jepa.models.vision_transformer import (  # noqa: E402
 )
 from event.representations import VoxelGrid  # noqa: E402
 from event.data import (  # noqa: E402
+    DSECVoxelBatchProvider,
     NImageNetVoxelBatchProvider,
     SyntheticVoxelBatchProvider,
     ensure_path_exists,
@@ -73,7 +74,7 @@ MODEL_SPECS: Dict[str, Dict[str, object]] = {
 COLLAPSE_STRATEGY_CHOICES = {"ema_stopgrad", "vicreg", "sigreg"}
 PREDICTOR_DEPTH_CHOICES = {4, 8, 12, 20, 24, 40}
 RECON_LOSS_CHOICES = {"smooth_l1", "mse"}
-DATA_SOURCE_CHOICES = {"synthetic", "n_imagenet"}
+DATA_SOURCE_CHOICES = {"synthetic", "n_imagenet", "dsec"}
 
 def set_seed(seed: int) -> None:
     random.seed(seed)
@@ -223,6 +224,44 @@ def build_batch_provider(
             world_size=dist_state.world_size,
         )
 
+    if source == "dsec":
+        split = str(cfg.data.dsec.split)
+        root_dir = cfg.data.dsec.root_dir
+        if not root_dir:
+            raise ValueError("data.dsec.root_dir must be set for data.source=dsec")
+        root_dir_abs = to_absolute_path(str(root_dir))
+        ensure_path_exists(root_dir_abs, "DSEC root_dir")
+
+        split_config = cfg.data.dsec.split_config
+        split_config_abs = None
+        if split_config:
+            split_config_abs = to_absolute_path(str(split_config))
+            ensure_path_exists(split_config_abs, "DSEC split_config")
+
+        return DSECVoxelBatchProvider(
+            root_dir=root_dir_abs,
+            split=split,
+            voxel_builder=voxel_builder,
+            batch_size=int(cfg.batch_size),
+            normalize_voxel=bool(cfg.normalize_voxel),
+            num_workers=int(cfg.data.num_workers),
+            pin_memory=bool(cfg.data.pin_memory),
+            drop_last=bool(cfg.data.drop_last),
+            split_config=split_config_abs,
+            sync=str(cfg.data.dsec.sync),
+            image_view=str(cfg.data.dsec.image_view),
+            load_events=bool(cfg.data.dsec.load_events),
+            load_rgb=bool(cfg.data.dsec.load_rgb),
+            load_labels=bool(cfg.data.dsec.load_labels),
+            limit_samples=cfg.data.dsec.limit_samples,
+            sensor_height=int(cfg.data.dsec.sensor_height),
+            sensor_width=int(cfg.data.dsec.sensor_width),
+            rescale_to_voxel_grid=bool(cfg.data.dsec.rescale_to_voxel_grid),
+            distributed=dist_state.enabled,
+            rank=dist_state.rank,
+            world_size=dist_state.world_size,
+        )
+
     raise ValueError(f"Unknown data.source: {source}")
 
 
@@ -286,6 +325,44 @@ def build_eval_batch_provider(
             augment_enabled=False,
             hflip_prob=0.0,
             max_shift=0,
+            distributed=dist_state.enabled,
+            rank=dist_state.rank,
+            world_size=dist_state.world_size,
+        )
+
+    if source == "dsec":
+        split = str(cfg.eval.split)
+        root_dir = cfg.data.dsec.root_dir
+        if not root_dir:
+            raise ValueError("data.dsec.root_dir must be set for data.source=dsec")
+        root_dir_abs = to_absolute_path(str(root_dir))
+        ensure_path_exists(root_dir_abs, "DSEC root_dir")
+
+        split_config = cfg.data.dsec.split_config
+        split_config_abs = None
+        if split_config:
+            split_config_abs = to_absolute_path(str(split_config))
+            ensure_path_exists(split_config_abs, "DSEC split_config")
+
+        return DSECVoxelBatchProvider(
+            root_dir=root_dir_abs,
+            split=split,
+            voxel_builder=voxel_builder,
+            batch_size=int(cfg.batch_size),
+            normalize_voxel=bool(cfg.normalize_voxel),
+            num_workers=int(cfg.data.num_workers),
+            pin_memory=bool(cfg.data.pin_memory),
+            drop_last=False,
+            split_config=split_config_abs,
+            sync=str(cfg.data.dsec.sync),
+            image_view=str(cfg.data.dsec.image_view),
+            load_events=bool(cfg.data.dsec.load_events),
+            load_rgb=bool(cfg.data.dsec.load_rgb),
+            load_labels=bool(cfg.data.dsec.load_labels),
+            limit_samples=cfg.data.dsec.limit_samples,
+            sensor_height=int(cfg.data.dsec.sensor_height),
+            sensor_width=int(cfg.data.dsec.sensor_width),
+            rescale_to_voxel_grid=bool(cfg.data.dsec.rescale_to_voxel_grid),
             distributed=dist_state.enabled,
             rank=dist_state.rank,
             world_size=dist_state.world_size,
@@ -504,12 +581,41 @@ def maybe_validate_cfg(cfg: DictConfig) -> None:
         if int(cfg.data.n_imagenet.augment.max_shift) < 0:
             raise ValueError("data.n_imagenet.augment.max_shift must be >= 0")
 
+    if str(cfg.data.source) == "dsec":
+        if str(cfg.data.dsec.split) not in {"train", "val", "test"}:
+            raise ValueError("data.dsec.split must be train|val|test")
+        if str(cfg.data.dsec.sync) not in {"front", "back"}:
+            raise ValueError("data.dsec.sync must be front|back")
+        if str(cfg.data.dsec.image_view) not in {"distorted", "rectified"}:
+            raise ValueError("data.dsec.image_view must be distorted|rectified")
+        if int(cfg.data.dsec.sensor_height) < 1 or int(cfg.data.dsec.sensor_width) < 1:
+            raise ValueError("data.dsec.sensor_height/width must be >= 1")
+        if int(cfg.data.num_workers) < 0:
+            raise ValueError("data.num_workers must be >= 0")
+        if not bool(cfg.data.dsec.root_dir):
+            raise ValueError("data.dsec.root_dir must be set for data.source=dsec")
+        if not (
+            bool(cfg.data.dsec.load_events)
+            or bool(cfg.data.dsec.load_rgb)
+            or bool(cfg.data.dsec.load_labels)
+        ):
+            raise ValueError(
+                "At least one of data.dsec.load_events/load_rgb/load_labels must be true"
+            )
+        if not bool(cfg.data.dsec.load_events):
+            raise ValueError(
+                "Step1 pretraining requires events. Set data.dsec.load_events=true."
+            )
+
     if bool(cfg.eval.enabled):
         if int(cfg.eval.every) < 1:
             raise ValueError("eval.every must be >= 1")
         if int(cfg.eval.steps) < 1:
             raise ValueError("eval.steps must be >= 1")
-        if str(cfg.data.source) == "n_imagenet" and str(cfg.eval.split) not in {"val", "test", "train"}:
+        if (
+            str(cfg.data.source) in {"n_imagenet", "dsec"}
+            and str(cfg.eval.split) not in {"val", "test", "train"}
+        ):
             raise ValueError("eval.split must be train|val|test")
 
     if bool(cfg.logging.tensorboard.enabled) and SummaryWriter is None:

@@ -1,7 +1,9 @@
 """Dataset and batch-provider utilities for event data."""
 
+from .dsec import DSECEventsDataset, DSECVoxelCollator
 from .n_imagenet import NImageNetEventsDataset, NImageNetVoxelCollator
 from .providers import (
+    DSECVoxelBatchProvider,
     NImageNetVoxelBatchProvider,
     SyntheticVoxelBatchProvider,
     ensure_path_exists,
@@ -9,6 +11,9 @@ from .providers import (
 )
 
 __all__ = [
+    "DSECEventsDataset",
+    "DSECVoxelCollator",
+    "DSECVoxelBatchProvider",
     "NImageNetEventsDataset",
     "NImageNetVoxelCollator",
     "NImageNetVoxelBatchProvider",

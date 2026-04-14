@@ -82,7 +82,7 @@ distributed:
   find_unused_parameters: false
 
 data:
-  source: synthetic  # synthetic | n_imagenet
+  source: synthetic  # synthetic | n_imagenet | dsec
   num_workers: 4
   pin_memory: true
   drop_last: true
@@ -116,6 +116,22 @@ data:
       enabled: false
       hflip_prob: 0.5
       max_shift: 20
+
+  dsec:
+    split: train  # train | val | test
+    root_dir: null
+    split_config: null  # optional YAML path (required when split=val in official layout)
+    sync: back  # front | back
+    image_view: distorted  # distorted | rectified
+
+    load_events: true
+    load_rgb: false
+    load_labels: false
+
+    limit_samples: null
+    sensor_height: 480
+    sensor_width: 640
+    rescale_to_voxel_grid: true
 
 hydra:
   run:

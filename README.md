@@ -24,6 +24,7 @@ pip install -r requirements.txt
 │   ├── event/
 │   │   ├── representations.py      # voxel grid 変換などイベント表現
 │   │   └── data/                   # データセット/コレータ/バッチ供給
+│   │       ├── dsec.py
 │   │       ├── n_imagenet.py
 │   │       ├── providers.py
 │   │       └── __init__.py
@@ -72,6 +73,22 @@ python scripts/train_step1_pretrain.py \
   data.num_workers=4
 ```
 
+### DSEC
+
+```bash
+source env/bin/activate
+python scripts/train_step1_pretrain.py \
+  data.source=dsec \
+  data.dsec.root_dir=/absolute/path/to/dsec_root \
+  data.dsec.split=train \
+  data.dsec.split_config=/absolute/path/to/train_val_test_split.yaml \
+  data.dsec.load_events=true \
+  data.dsec.load_rgb=false \
+  data.dsec.load_labels=false \
+  batch_size=8 \
+  data.num_workers=4
+```
+
 ## Collapse Strategy 切り替え
 
 - `collapse_strategy=ema_stopgrad`: EMA teacher + stop-grad（デフォルト）
@@ -110,8 +127,10 @@ torchrun --standalone --nproc_per_node=2 scripts/train_step1_pretrain.py \
 
 ## 補足
 
-- 学習データは `data.source` で切り替えます（`synthetic` / `n_imagenet`）。
+- 学習データは `data.source` で切り替えます（`synthetic` / `n_imagenet` / `dsec`）。
 - `n_imagenet` では list file（1行1サンプルの npz パス）を読み込みます。
+- `dsec` は DSEC-Detection 構造（`images/events/object_detections`）を読み込みます。
+- `dsec` では `data.dsec.load_events/load_rgb/load_labels` でロード対象を切り替えできます。
 - 学習出力は timestamp ごとに `outputs/train/YYYY-MM-DD/HH-MM-SS/` 配下へまとまります。
 - 例:
   - checkpoint: `outputs/train/.../.../checkpoints/step_000100.pt`
