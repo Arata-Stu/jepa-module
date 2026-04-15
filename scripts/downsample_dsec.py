@@ -300,7 +300,7 @@ def process_single_file(
     total_steps = num_iterations + (1 if has_remainder else 0)
 
     writer = None
-    pbar = tqdm.tqdm(total=total_steps, desc=input_path.name, disable=not show_pbar, leave=False)
+    pbar = tqdm.tqdm(total=total_steps, desc=input_path.name, leave=False) if show_pbar else None
     try:
         writer = H5Writer(tmp_output_path)
         change_map = None
@@ -319,7 +319,8 @@ def process_single_file(
                 change_map=change_map,
             )
             writer.add_data(downsampled_events)
-            pbar.update(1)
+            if pbar is not None:
+                pbar.update(1)
 
         if has_remainder:
             start_idx = num_iterations * num_events_per_chunk
@@ -334,7 +335,8 @@ def process_single_file(
                 change_map=change_map,
             )
             writer.add_data(downsampled_events)
-            pbar.update(1)
+            if pbar is not None:
+                pbar.update(1)
 
         writer.create_ms_to_idx()
         writer.close()
@@ -346,7 +348,8 @@ def process_single_file(
         _cleanup_tmp_file(tmp_path=tmp_output_path, context=f"exception cleanup for {input_path}", strict=False)
         raise
     finally:
-        pbar.close()
+        if pbar is not None:
+            pbar.close()
 
 
 def find_dsec_event_files(dsec_root: Path, splits):

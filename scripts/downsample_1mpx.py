@@ -312,7 +312,7 @@ def process_single_file(
     total_steps = num_full_chunks + (1 if has_remainder else 0)
 
     writer = None
-    pbar = tqdm.tqdm(total=total_steps, disable=not show_progress, leave=False, desc=input_path.name)
+    pbar = tqdm.tqdm(total=total_steps, leave=False, desc=input_path.name) if show_progress else None
     try:
         writer = H5Writer(tmp_output_path, out_height=output_height, out_width=output_width)
         change_map = None
@@ -331,7 +331,8 @@ def process_single_file(
                 change_map=change_map,
             )
             writer.add_data(downsampled_events)
-            pbar.update(1)
+            if pbar is not None:
+                pbar.update(1)
 
         if has_remainder:
             start_idx = num_full_chunks * num_events_per_chunk
@@ -346,7 +347,8 @@ def process_single_file(
                 change_map=change_map,
             )
             writer.add_data(downsampled_events)
-            pbar.update(1)
+            if pbar is not None:
+                pbar.update(1)
 
         if write_ms_to_idx:
             writer.create_ms_to_idx()
@@ -359,7 +361,8 @@ def process_single_file(
         _cleanup_tmp_file(tmp_path=tmp_output_path, context=f"exception cleanup for {input_path}", strict=False)
         raise
     finally:
-        pbar.close()
+        if pbar is not None:
+            pbar.close()
 
 
 def process_single_h5(
