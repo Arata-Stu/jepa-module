@@ -104,6 +104,21 @@ def count_trainable_params(model: torch.nn.Module) -> int:
     return sum(p.numel() for p in model.parameters() if p.requires_grad)
 
 
+def _temporal_mix_enabled(cfg: DictConfig) -> bool:
+    temporal_mix_cfg = cfg.get("temporal_mix", None)
+    if temporal_mix_cfg is None:
+        return False
+    return bool(temporal_mix_cfg.get("enabled", False))
+
+
+def _predictor_modality(cfg: DictConfig, temporal_bins: int) -> str:
+    if _temporal_mix_enabled(cfg):
+        short_t = int(cfg.temporal_mix.short_t)
+        if temporal_bins == short_t:
+            return "image"
+    return "video"
+
+
 def build_models(cfg: DictConfig) -> Tuple[torch.nn.Module, torch.nn.Module]:
     spec = MODEL_SPECS[str(cfg.model_size)]
     encoder_builder: Callable[..., torch.nn.Module] = spec["builder"]  # type: ignore[assignment]
@@ -118,6 +133,8 @@ def build_models(cfg: DictConfig) -> Tuple[torch.nn.Module, torch.nn.Module]:
             "predictor-embed-dim must be divisible by predictor-heads "
             f"(got {cfg.predictor_embed_dim} and {predictor_heads})"
         )
+    temporal_mix_enabled = _temporal_mix_enabled(cfg)
+    img_temporal_dim_size = int(cfg.temporal_mix.short_t) if temporal_mix_enabled else None
 
     encoder = encoder_builder(
         img_size=(int(cfg.height), int(cfg.width)),
@@ -126,7 +143,8 @@ def build_models(cfg: DictConfig) -> Tuple[torch.nn.Module, torch.nn.Module]:
         tubelet_size=int(cfg.tubelet_size),
         in_chans=1,
         use_rope=True,
-        modality_embedding=False,
+        modality_embedding=temporal_mix_enabled,
+        img_temporal_dim_size=img_temporal_dim_size,
         n_output_distillation=4,
     )
 
@@ -142,24 +160,105 @@ def build_models(cfg: DictConfig) -> Tuple[torch.nn.Module, torch.nn.Module]:
         use_rope=True,
         use_mask_tokens=True,
         num_mask_tokens=int(cfg.num_mask_tokens),
-        modality_embedding=False,
+        modality_embedding=temporal_mix_enabled,
+        img_temporal_dim_size=img_temporal_dim_size,
         n_output_distillation=4,
     )
     return encoder, predictor
 
 
-def build_mask_generator(cfg: DictConfig) -> _MaskGenerator:
+def _build_mask_generator(
+    cfg: DictConfig,
+    num_frames: int,
+    temporal_patch_size: int,
+) -> _MaskGenerator:
     return _MaskGenerator(
         crop_size=(int(cfg.height), int(cfg.width)),
-        num_frames=int(cfg.t_bins),
+        num_frames=int(num_frames),
         spatial_patch_size=(int(cfg.patch_size), int(cfg.patch_size)),
-        temporal_patch_size=int(cfg.tubelet_size),
+        temporal_patch_size=int(temporal_patch_size),
         spatial_pred_mask_scale=(float(cfg.spatial_mask_min), float(cfg.spatial_mask_max)),
         temporal_pred_mask_scale=(float(cfg.temporal_mask_min), float(cfg.temporal_mask_max)),
         aspect_ratio=(float(cfg.aspect_min), float(cfg.aspect_max)),
         npred=int(cfg.num_pred_blocks),
         max_context_frames_ratio=float(cfg.max_context_frames_ratio),
     )
+
+
+def build_mask_generators(cfg: DictConfig) -> dict[int, _MaskGenerator]:
+    long_t = int(cfg.t_bins)
+    generators: dict[int, _MaskGenerator] = {
+        long_t: _build_mask_generator(
+            cfg=cfg,
+            num_frames=long_t,
+            temporal_patch_size=int(cfg.tubelet_size),
+        )
+    }
+
+    if _temporal_mix_enabled(cfg):
+        short_t = int(cfg.temporal_mix.short_t)
+        if short_t not in generators:
+            generators[short_t] = _build_mask_generator(
+                cfg=cfg,
+                num_frames=short_t,
+                temporal_patch_size=1,
+            )
+
+    return generators
+
+
+def _prepare_temporal_inputs(
+    cfg: DictConfig,
+    inputs: torch.Tensor,
+    training: bool,
+) -> tuple[torch.Tensor, int]:
+    if inputs.ndim == 4:
+        return inputs, 1
+    if inputs.ndim != 5:
+        raise ValueError(
+            "Expected model inputs to be 4D or 5D tensor, "
+            f"got shape={tuple(inputs.shape)}"
+        )
+
+    current_t = int(inputs.shape[2])
+    if not _temporal_mix_enabled(cfg):
+        if int(cfg.t_bins) == 1 and current_t == 1:
+            return inputs.squeeze(2), 1
+        return inputs, current_t
+
+    short_t = int(cfg.temporal_mix.short_t)
+    image_prob = float(cfg.temporal_mix.image_prob)
+    short_mode = str(cfg.temporal_mix.short_mode)
+
+    use_short = False
+    if training and current_t != short_t and image_prob > 0.0:
+        use_short = random.random() < image_prob
+
+    if not use_short:
+        return inputs, current_t
+
+    if short_t < 1 or short_t > current_t:
+        raise ValueError(
+            f"temporal_mix.short_t must be in [1, current_t={current_t}], got {short_t}"
+        )
+
+    if short_t == 1:
+        if short_mode == "sum":
+            return inputs.sum(dim=2, keepdim=True), 1
+        if short_mode == "first":
+            return inputs[:, :, :1, :, :], 1
+        if short_mode == "center":
+            center = current_t // 2
+            return inputs[:, :, center : center + 1, :, :], 1
+        raise ValueError(
+            f"Unknown temporal_mix.short_mode={short_mode}; use sum|first|center"
+        )
+
+    if training:
+        start = random.randint(0, current_t - short_t)
+    else:
+        start = (current_t - short_t) // 2
+    return inputs[:, :, start : start + short_t, :, :], short_t
 
 
 def build_batch_provider(
@@ -394,7 +493,7 @@ def forward_step(
     encoder: torch.nn.Module,
     predictor: torch.nn.Module,
     teacher_encoder: torch.nn.Module | None,
-    mask_generator: _MaskGenerator,
+    mask_generators: dict[int, _MaskGenerator],
     collapse_strategy: str,
     sigreg: SIGReg,
     vicreg: VICRegRegularizer,
@@ -402,7 +501,17 @@ def forward_step(
     vicreg_std_weight: float,
     vicreg_cov_weight: float,
     device: torch.device,
+    training: bool = True,
 ) -> dict[str, Any]:
+    inputs, temporal_bins = _prepare_temporal_inputs(cfg=cfg, inputs=inputs, training=training)
+    predictor_mod = _predictor_modality(cfg, temporal_bins)
+    mask_generator = mask_generators.get(temporal_bins)
+    if mask_generator is None:
+        raise ValueError(
+            f"No mask generator is configured for temporal bins={temporal_bins}. "
+            f"Available={sorted(mask_generators.keys())}"
+        )
+
     current_batch_size = int(inputs.shape[0])
     masks_enc, masks_pred = mask_generator(current_batch_size)
     masks_enc = masks_enc.to(device=device, non_blocking=True)
@@ -422,7 +531,7 @@ def forward_step(
         context_tokens,
         masks_x=[masks_enc],
         masks_y=[masks_pred],
-        mod="video",
+        mod=predictor_mod,
         mask_index=step,
     )
 
@@ -473,7 +582,7 @@ def run_eval(
     encoder: torch.nn.Module,
     predictor: torch.nn.Module,
     teacher_encoder: torch.nn.Module | None,
-    mask_generator: _MaskGenerator,
+    mask_generators: dict[int, _MaskGenerator],
     collapse_strategy: str,
     sigreg: SIGReg,
     vicreg: VICRegRegularizer,
@@ -503,7 +612,7 @@ def run_eval(
             encoder=encoder,
             predictor=predictor,
             teacher_encoder=teacher_encoder,
-            mask_generator=mask_generator,
+            mask_generators=mask_generators,
             collapse_strategy=collapse_strategy,
             sigreg=sigreg,
             vicreg=vicreg,
@@ -511,6 +620,7 @@ def run_eval(
             vicreg_std_weight=vicreg_std_weight,
             vicreg_cov_weight=vicreg_cov_weight,
             device=device,
+            training=False,
         )
         totals["loss"] += _extract_scalar(metrics["loss"])
         totals["recon_loss"] += _extract_scalar(metrics["recon_loss"])
@@ -550,8 +660,21 @@ def maybe_validate_cfg(cfg: DictConfig) -> None:
 
     if int(cfg.height) % int(cfg.patch_size) != 0 or int(cfg.width) % int(cfg.patch_size) != 0:
         raise ValueError("height/width must be divisible by patch-size")
+    if int(cfg.t_bins) < 1:
+        raise ValueError("t-bins must be >= 1")
+    if int(cfg.tubelet_size) < 1:
+        raise ValueError("tubelet-size must be >= 1")
     if int(cfg.t_bins) % int(cfg.tubelet_size) != 0:
         raise ValueError("t-bins must be divisible by tubelet-size")
+    if _temporal_mix_enabled(cfg):
+        short_t = int(cfg.temporal_mix.short_t)
+        if short_t < 1 or short_t > int(cfg.t_bins):
+            raise ValueError("temporal_mix.short_t must satisfy 1 <= short_t <= t-bins")
+        if not (0.0 <= float(cfg.temporal_mix.image_prob) <= 1.0):
+            raise ValueError("temporal_mix.image_prob must be in [0, 1]")
+        short_mode = str(cfg.temporal_mix.short_mode)
+        if short_mode not in {"sum", "first", "center"}:
+            raise ValueError("temporal_mix.short_mode must be sum|first|center")
     if float(cfg.sigreg_weight) < 0:
         raise ValueError("sigreg-weight must be >= 0")
     if float(cfg.vicreg_std_weight) < 0 or float(cfg.vicreg_cov_weight) < 0:
@@ -760,7 +883,7 @@ def main(cfg: DictConfig) -> None:
         vicreg_std_weight = 0.1
         vicreg_cov_weight = 0.01
 
-    mask_generator = build_mask_generator(cfg)
+    mask_generators = build_mask_generators(cfg)
     voxel_builder = VoxelGrid(
         channels=int(cfg.t_bins),
         height=int(cfg.height),
@@ -853,7 +976,7 @@ def main(cfg: DictConfig) -> None:
                 encoder=encoder,
                 predictor=predictor,
                 teacher_encoder=teacher_encoder,
-                mask_generator=mask_generator,
+                mask_generators=mask_generators,
                 collapse_strategy=collapse_strategy,
                 sigreg=sigreg,
                 vicreg=vicreg,
@@ -861,6 +984,7 @@ def main(cfg: DictConfig) -> None:
                 vicreg_std_weight=vicreg_std_weight,
                 vicreg_cov_weight=vicreg_cov_weight,
                 device=device,
+                training=True,
             )
 
             loss = step_metrics["loss"]
@@ -959,7 +1083,7 @@ def main(cfg: DictConfig) -> None:
                     encoder=encoder,
                     predictor=predictor,
                     teacher_encoder=teacher_encoder,
-                    mask_generator=mask_generator,
+                    mask_generators=mask_generators,
                     collapse_strategy=collapse_strategy,
                     sigreg=sigreg,
                     vicreg=vicreg,

@@ -4,6 +4,7 @@ import random
 from pathlib import Path
 from typing import Any
 
+import h5py
 import numpy as np
 import torch
 from torch.utils.data import Dataset
@@ -48,6 +49,54 @@ def _load_n_imagenet_npz(
         p_t = p_t[order]
 
     return x_t, y_t, p_t, t_t
+
+
+def _load_n_imagenet_h5(
+    event_path: Path,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+    with h5py.File(str(event_path), "r") as h5f:
+        if "events" in h5f:
+            events = h5f["events"]
+            x = np.asarray(events["x"])
+            y = np.asarray(events["y"])
+            t = np.asarray(events["t"])
+            p = np.asarray(events["p"])
+        else:
+            x = np.asarray(h5f["x"])
+            y = np.asarray(h5f["y"])
+            t = np.asarray(h5f["t"])
+            p = np.asarray(h5f["p"])
+
+    x_t = torch.from_numpy(np.rint(x).astype(np.int64))
+    y_t = torch.from_numpy(np.rint(y).astype(np.int64))
+    t_t = torch.from_numpy(np.rint(t).astype(np.int64))
+    p_t = torch.from_numpy((np.asarray(p) > 0).astype(np.int64))
+
+    if t_t.numel() > 1:
+        order = torch.argsort(t_t)
+        x_t = x_t[order]
+        y_t = y_t[order]
+        t_t = t_t[order]
+        p_t = p_t[order]
+
+    return x_t, y_t, p_t, t_t
+
+
+def _load_n_imagenet_events(
+    event_path: Path,
+    compressed: bool,
+    time_scale: float,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+    suffix = event_path.suffix.lower()
+    if suffix == ".npz":
+        return _load_n_imagenet_npz(
+            event_path=event_path,
+            compressed=compressed,
+            time_scale=time_scale,
+        )
+    if suffix in {".h5", ".hdf5"}:
+        return _load_n_imagenet_h5(event_path=event_path)
+    raise ValueError(f"Unsupported event file extension for N-ImageNet: {event_path}")
 
 
 class NImageNetEventsDataset(Dataset):
@@ -202,7 +251,7 @@ class NImageNetEventsDataset(Dataset):
 
     def __getitem__(self, idx: int) -> dict[str, Any]:
         event_path = self.sample_paths[idx]
-        x, y, p, t = _load_n_imagenet_npz(
+        x, y, p, t = _load_n_imagenet_events(
             event_path=event_path,
             compressed=self.compressed,
             time_scale=self.time_scale,

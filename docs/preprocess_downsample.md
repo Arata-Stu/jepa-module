@@ -1,6 +1,6 @@
 # Preprocess Downsample Guide
 
-`scripts/downsample_1mpx.py` と `scripts/downsample_dsec.py` は、イベント H5 を空間ダウンサンプルする前処理スクリプトです。
+`scripts/downsample_1mpx.py` / `scripts/downsample_dsec.py` / `scripts/downsample_n_imagenet.py` は、イベント前処理スクリプトです。
 
 - 共通ロジック:
   - 極性 `p` は処理時に `-1/+1` へ変換して積算し、保存時に `0/1` へ戻します。
@@ -72,6 +72,57 @@ python scripts/downsample_dsec.py \
 - `--num_events_per_chunk 100000`: チャンクサイズ調整
 - `--dsec_root`: `--dataset_root` の互換エイリアス
 
+## N-ImageNet: `scripts/downsample_n_imagenet.py`
+
+N-ImageNet は `npz` 入力を読み込み、`H5(events/x,y,p,t)` として保存します。
+
+### 単一ファイル処理
+
+```bash
+python scripts/downsample_n_imagenet.py \
+  --input_path /path/to/sample.npz \
+  --output_path /path/to/sample_2x.h5 \
+  --input_height 480 \
+  --input_width 640 \
+  --output_height 240 \
+  --output_width 320
+```
+
+### list file 一括処理（推奨）
+
+既存の `train_list.txt` / `val_list.txt` をそのまま使えます。
+
+```bash
+python scripts/downsample_n_imagenet.py \
+  --list_files /path/to/train_list.txt /path/to/val_list.txt \
+  --root_dir /path/to/N_Imagenet \
+  --output_root /path/to/N_Imagenet_h5 \
+  --output_suffix _2x.h5 \
+  --num_processes 4
+```
+
+### dataset root 一括処理
+
+`dataset_root/<split>/` 配下の `.npz` を探索して処理します。
+
+```bash
+python scripts/downsample_n_imagenet.py \
+  --dataset_root /path/to/n_imagenet_root \
+  --splits train val test \
+  --recursive \
+  --num_processes 4
+```
+
+主なオプション:
+
+- `--compressed` / `--uncompressed`: npz 格納形式の読み分け
+- `--time_scale`: 秒単位 timestamp を us へ変換する倍率（既定: `1e6`）
+- `--output_root`: 別ディレクトリへ出力（相対構造を維持）
+- `--overwrite`: 既存出力を上書き
+- `--tmp_suffix`: 中断再開用 tmp suffix
+- `--num_events_per_chunk`: チャンクサイズ
+- `--write_ms_to_idx`: 出力 H5 に `ms_to_idx` を書く
+
 ## 既存出力と再実行
 
 - 既定では、最終出力ファイルが既に存在する場合はスキップします。
@@ -91,3 +142,10 @@ data:
 
 - `downsample: false` のとき `events.h5`
 - `downsample: true` のとき `downsample_event_file`（既定: `events_2x.h5`）
+
+## 学習ローダとの連携（N-ImageNet）
+
+`src/event/data/n_imagenet.py` は `npz` に加えて `h5` も読めます。
+
+- `.npz`: 既存フォーマット（`event_data` または `x_pos/y_pos/timestamp/polarity`）
+- `.h5`: `events/x,y,p,t`（この前処理スクリプトの出力）

@@ -8,7 +8,7 @@
 ## 実装配置
 
 - `src/event/data/n_imagenet.py`
-  - `NImageNetEventsDataset`: list file を読み、npz からイベント列 `(x, y, pol, time)` を返す。
+  - `NImageNetEventsDataset`: list file を読み、`npz` または `h5` からイベント列 `(x, y, pol, time)` を返す。
   - `NImageNetVoxelCollator`: バッチ化時に voxel grid へ変換する。
 - `src/event/data/providers.py`
   - `NImageNetVoxelBatchProvider`: `DataLoader` をラップして `next_batch()` を提供。

@@ -18,6 +18,12 @@ t_bins: 8
 patch_size: 16
 tubelet_size: 2
 
+temporal_mix:
+  enabled: false
+  short_t: 1
+  image_prob: 0.5
+  short_mode: sum  # sum | first | center
+
 predictor_depth: 4
 predictor_embed_dim: 384
 predictor_heads: null
