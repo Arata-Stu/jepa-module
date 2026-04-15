@@ -227,7 +227,7 @@ def _process_file_with_retry(
     input_width: int | None,
     output_height: int,
     output_width: int,
-    chunk_size: int,
+    num_events_per_chunk: int,
     write_ms_to_idx: bool,
     tmp_suffix: str,
 ) -> tuple[bool, str | None]:
@@ -237,14 +237,14 @@ def _process_file_with_retry(
 
     for attempt in (1, 2):
         try:
-            process_single_h5(
+            process_single_file(
                 input_path=input_path,
                 output_path=output_path,
                 input_height=input_height,
                 input_width=input_width,
                 output_height=output_height,
                 output_width=output_width,
-                chunk_size=chunk_size,
+                num_events_per_chunk=num_events_per_chunk,
                 write_ms_to_idx=write_ms_to_idx,
                 show_progress=False,
                 tmp_suffix=tmp_suffix,
@@ -275,21 +275,21 @@ def _worker_process_file(job: dict) -> tuple[str, bool, str | None]:
         input_width=job["input_width"],
         output_height=job["output_height"],
         output_width=job["output_width"],
-        chunk_size=job["chunk_size"],
+        num_events_per_chunk=job["num_events_per_chunk"],
         write_ms_to_idx=job["write_ms_to_idx"],
         tmp_suffix=job["tmp_suffix"],
     )
     return str(input_path), ok, err
 
 
-def process_single_h5(
+def process_single_file(
     input_path: Path,
     output_path: Path,
     input_height: int | None,
     input_width: int | None,
     output_height: int,
     output_width: int,
-    chunk_size: int,
+    num_events_per_chunk: int,
     write_ms_to_idx: bool,
     show_progress: bool,
     tmp_suffix: str,
@@ -306,7 +306,7 @@ def process_single_h5(
     _scale_factors(resolved_input_height, resolved_input_width, output_height, output_width)
 
     num_events = get_num_events(input_path)
-    num_events_per_chunk = max(1, int(chunk_size))
+    num_events_per_chunk = max(1, int(num_events_per_chunk))
     num_full_chunks = num_events // num_events_per_chunk
     has_remainder = (num_events % num_events_per_chunk) > 0
     total_steps = num_full_chunks + (1 if has_remainder else 0)
@@ -362,6 +362,33 @@ def process_single_h5(
         pbar.close()
 
 
+def process_single_h5(
+    input_path: Path,
+    output_path: Path,
+    input_height: int | None,
+    input_width: int | None,
+    output_height: int,
+    output_width: int,
+    chunk_size: int,
+    write_ms_to_idx: bool,
+    show_progress: bool,
+    tmp_suffix: str,
+) -> None:
+    # Backward-compatible wrapper.
+    process_single_file(
+        input_path=input_path,
+        output_path=output_path,
+        input_height=input_height,
+        input_width=input_width,
+        output_height=output_height,
+        output_width=output_width,
+        num_events_per_chunk=chunk_size,
+        write_ms_to_idx=write_ms_to_idx,
+        show_progress=show_progress,
+        tmp_suffix=tmp_suffix,
+    )
+
+
 def _find_h5_files(dataset_root: Path, splits: list[str], recursive: bool) -> list[Path]:
     input_files: list[Path] = []
     for split in splits:
@@ -407,7 +434,7 @@ def process_dataset_root(
     input_width: int | None,
     output_height: int,
     output_width: int,
-    chunk_size: int,
+    num_events_per_chunk: int,
     write_ms_to_idx: bool,
     recursive: bool,
     tmp_suffix: str,
@@ -454,7 +481,7 @@ def process_dataset_root(
                 "input_width": input_width,
                 "output_height": output_height,
                 "output_width": output_width,
-                "chunk_size": chunk_size,
+                "num_events_per_chunk": num_events_per_chunk,
                 "write_ms_to_idx": write_ms_to_idx,
                 "tmp_suffix": tmp_suffix,
             }
@@ -508,9 +535,15 @@ if __name__ == "__main__":
     parser.add_argument("--input_width", type=int, default=None, help="Input event width (auto if omitted)")
     parser.add_argument("--output_height", type=int, default=360, help="Output event height")
     parser.add_argument("--output_width", type=int, default=640, help="Output event width")
-    parser.add_argument("--chunk_size", type=int, default=100000, help="Events per chunk")
+    parser.add_argument("--num_events_per_chunk", type=int, default=100000, help="Number of events loaded per chunk.")
+    parser.add_argument("--chunk_size", type=int, default=None,
+                        help="Deprecated alias for --num_events_per_chunk.")
     parser.add_argument("--write_ms_to_idx", action="store_true", help="Also write ms_to_idx index to output H5")
     args = parser.parse_args()
+
+    num_events_per_chunk = int(args.num_events_per_chunk)
+    if args.chunk_size is not None:
+        num_events_per_chunk = int(args.chunk_size)
 
     is_single_mode = args.input_path is not None or args.output_path is not None
     is_root_mode = args.dataset_root is not None
@@ -529,7 +562,7 @@ if __name__ == "__main__":
             input_width=args.input_width,
             output_height=args.output_height,
             output_width=args.output_width,
-            chunk_size=args.chunk_size,
+            num_events_per_chunk=num_events_per_chunk,
             write_ms_to_idx=args.write_ms_to_idx,
             recursive=args.recursive,
             tmp_suffix=args.tmp_suffix,
@@ -539,14 +572,14 @@ if __name__ == "__main__":
         if args.input_path is None or args.output_path is None:
             parser.error("Single-file mode requires both --input_path and --output_path.")
 
-        process_single_h5(
+        process_single_file(
             input_path=args.input_path,
             output_path=args.output_path,
             input_height=args.input_height,
             input_width=args.input_width,
             output_height=args.output_height,
             output_width=args.output_width,
-            chunk_size=args.chunk_size,
+            num_events_per_chunk=num_events_per_chunk,
             write_ms_to_idx=args.write_ms_to_idx,
             show_progress=True,
             tmp_suffix=args.tmp_suffix,

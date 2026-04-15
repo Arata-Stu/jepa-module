@@ -5,10 +5,15 @@ import os
 import multiprocessing as mp
 
 import h5py
-import hdf5plugin  # noqa: F401
 import numba
 import numpy as np
 import tqdm
+
+try:
+    import hdf5plugin  # noqa: F401
+    _HAS_BLOSC = True
+except ImportError:
+    _HAS_BLOSC = False
 
 
 def _compression_opts():
@@ -26,11 +31,18 @@ def _compression_opts():
     return compression_opts
 
 
-H5_BLOSC_COMPRESSION_FLAGS = dict(
-    compression=32001,
-    compression_opts=_compression_opts(),  # Blosc
-    chunks=True,
-)
+if _HAS_BLOSC:
+    H5_COMPRESSION_FLAGS = dict(
+        compression=32001,
+        compression_opts=_compression_opts(),  # Blosc
+        chunks=True,
+    )
+else:
+    H5_COMPRESSION_FLAGS = dict(
+        compression="gzip",
+        compression_opts=1,
+        chunks=True,
+    )
 
 
 def _extract_from_h5_by_index(filehandle, ev_start_idx: int, ev_end_idx: int):
@@ -89,10 +101,10 @@ class H5Writer:
         shape = (2**16,)
         maxshape = (None,)
 
-        self.h5f.create_dataset("events/x", shape=shape, dtype="u2", maxshape=maxshape, **H5_BLOSC_COMPRESSION_FLAGS)
-        self.h5f.create_dataset("events/y", shape=shape, dtype="u2", maxshape=maxshape, **H5_BLOSC_COMPRESSION_FLAGS)
-        self.h5f.create_dataset("events/p", shape=shape, dtype="u1", maxshape=maxshape, **H5_BLOSC_COMPRESSION_FLAGS)
-        self.h5f.create_dataset("events/t", shape=shape, dtype="u4", maxshape=maxshape, **H5_BLOSC_COMPRESSION_FLAGS)
+        self.h5f.create_dataset("events/x", shape=shape, dtype="u2", maxshape=maxshape, **H5_COMPRESSION_FLAGS)
+        self.h5f.create_dataset("events/y", shape=shape, dtype="u2", maxshape=maxshape, **H5_COMPRESSION_FLAGS)
+        self.h5f.create_dataset("events/p", shape=shape, dtype="u1", maxshape=maxshape, **H5_COMPRESSION_FLAGS)
+        self.h5f.create_dataset("events/t", shape=shape, dtype="u4", maxshape=maxshape, **H5_COMPRESSION_FLAGS)
 
     def create_ms_to_idx(self):
         if self.t_offset is None:
@@ -100,7 +112,7 @@ class H5Writer:
             self.h5f.create_dataset("t_offset", data=self.t_offset, dtype="i8")
 
         t_us = self.h5f["events/t"][()]
-        self.h5f.create_dataset("ms_to_idx", data=create_ms_to_idx(t_us), dtype="u8", **H5_BLOSC_COMPRESSION_FLAGS)
+        self.h5f.create_dataset("ms_to_idx", data=create_ms_to_idx(t_us), dtype="u8", **H5_COMPRESSION_FLAGS)
 
     @staticmethod
     def close_callback(h5f: h5py.File):
@@ -168,7 +180,7 @@ def _filter_events_resize(x, y, p, mask, change_map, fx, fy):
     return mask, change_map
 
 
-def _downsample_one_chunk(input_path, start_idx, end_idx, input_height, input_width, output_height, output_width, change_map):
+def _process_chunk(input_path, start_idx, end_idx, input_height, input_width, output_height, output_width, change_map):
     events = extract_from_h5_by_index(input_path, start_idx, end_idx)
     events["p"] = 2 * events["p"].astype("int8") - 1
     downsampled_events, change_map = downsample_events(
@@ -181,6 +193,11 @@ def _downsample_one_chunk(input_path, start_idx, end_idx, input_height, input_wi
     )
     downsampled_events["p"] = ((downsampled_events["p"] + 1) // 2).astype("uint8")
     return downsampled_events, change_map
+
+
+def _downsample_one_chunk(input_path, start_idx, end_idx, input_height, input_width, output_height, output_width, change_map):
+    # Backward-compatible alias.
+    return _process_chunk(input_path, start_idx, end_idx, input_height, input_width, output_height, output_width, change_map)
 
 
 def _tmp_output_path(output_path: Path, tmp_suffix: str) -> Path:
@@ -203,7 +220,7 @@ def _cleanup_tmp_file(tmp_path: Path, context: str, strict: bool = True) -> bool
         return False
 
 
-def _process_dsec_file_with_retry(
+def _process_file_with_retry(
     input_path: Path,
     output_path: Path,
     input_height: int,
@@ -246,10 +263,10 @@ def _process_dsec_file_with_retry(
     return False, "unknown failure"
 
 
-def _worker_process_dsec(job: dict) -> tuple[str, bool, str | None]:
+def _worker_process_file(job: dict) -> tuple[str, bool, str | None]:
     input_path = Path(job["input_path"])
     output_path = Path(job["output_path"])
-    ok, err = _process_dsec_file_with_retry(
+    ok, err = _process_file_with_retry(
         input_path=input_path,
         output_path=output_path,
         input_height=job["input_height"],
@@ -291,7 +308,7 @@ def process_single_file(
         for i in range(num_iterations):
             start_idx = i * num_events_per_chunk
             end_idx = (i + 1) * num_events_per_chunk
-            downsampled_events, change_map = _downsample_one_chunk(
+            downsampled_events, change_map = _process_chunk(
                 input_path=input_path,
                 start_idx=start_idx,
                 end_idx=end_idx,
@@ -306,7 +323,7 @@ def process_single_file(
 
         if has_remainder:
             start_idx = num_iterations * num_events_per_chunk
-            downsampled_events, change_map = _downsample_one_chunk(
+            downsampled_events, change_map = _process_chunk(
                 input_path=input_path,
                 start_idx=start_idx,
                 end_idx=num_events,
@@ -361,8 +378,8 @@ def _build_output_path(input_path: Path, dsec_root: Path, output_root: Path | No
     return output_root / rel_input.parent / output_name
 
 
-def process_dsec_root(
-    dsec_root,
+def process_dataset_root(
+    dataset_root,
     splits,
     output_name,
     overwrite,
@@ -378,9 +395,9 @@ def process_dsec_root(
     if int(num_processes) < 1:
         raise ValueError("num_processes must be >= 1")
 
-    input_files = find_dsec_event_files(dsec_root=dsec_root, splits=splits)
+    input_files = find_dsec_event_files(dsec_root=dataset_root, splits=splits)
     if len(input_files) == 0:
-        raise FileNotFoundError(f"No events.h5 found under root={dsec_root}, splits={splits}")
+        raise FileNotFoundError(f"No events.h5 found under root={dataset_root}, splits={splits}")
     if output_root is not None:
         output_root.mkdir(parents=True, exist_ok=True)
 
@@ -392,7 +409,7 @@ def process_dsec_root(
     for input_path in tqdm.tqdm(input_files, desc="DSEC sequences"):
         output_path = _build_output_path(
             input_path=input_path,
-            dsec_root=dsec_root,
+            dsec_root=dataset_root,
             output_root=output_root,
             output_name=output_name,
         )
@@ -418,7 +435,7 @@ def process_dsec_root(
 
     if len(jobs) > 0:
         if int(num_processes) == 1:
-            iterator = (_worker_process_dsec(job) for job in jobs)
+            iterator = (_worker_process_file(job) for job in jobs)
             for input_name, success, err in tqdm.tqdm(iterator, total=len(jobs), desc="DSEC workers"):
                 if success:
                     num_done += 1
@@ -429,7 +446,7 @@ def process_dsec_root(
             ctx = mp.get_context("spawn")
             with ctx.Pool(processes=int(num_processes)) as pool:
                 for input_name, success, err in tqdm.tqdm(
-                    pool.imap_unordered(_worker_process_dsec, jobs),
+                    pool.imap_unordered(_worker_process_file, jobs),
                     total=len(jobs),
                     desc="DSEC workers",
                 ):
@@ -442,7 +459,38 @@ def process_dsec_root(
     print(f"[SUMMARY] done={num_done}, skipped={num_skipped}, failed={num_failed}")
 
     if num_failed > 0:
-        raise RuntimeError(f"{num_failed} sequences failed while processing {dsec_root}")
+        raise RuntimeError(f"{num_failed} sequences failed while processing {dataset_root}")
+
+
+def process_dsec_root(
+    dsec_root,
+    splits,
+    output_name,
+    overwrite,
+    output_root,
+    input_height,
+    input_width,
+    output_height,
+    output_width,
+    num_events_per_chunk,
+    tmp_suffix,
+    num_processes,
+):
+    # Backward-compatible wrapper.
+    process_dataset_root(
+        dataset_root=dsec_root,
+        splits=splits,
+        output_name=output_name,
+        overwrite=overwrite,
+        output_root=output_root,
+        input_height=input_height,
+        input_width=input_width,
+        output_height=output_height,
+        output_width=output_width,
+        num_events_per_chunk=num_events_per_chunk,
+        tmp_suffix=tmp_suffix,
+        num_processes=num_processes,
+    )
 
 
 if __name__ == "__main__":
@@ -450,6 +498,7 @@ if __name__ == "__main__":
     parser.add_argument("--input_path", type=Path, help="Path to input events.h5.")
     parser.add_argument("--output_path", type=Path, help="Path where output events.h5 will be written.")
     parser.add_argument("--dsec_root", type=Path, help="Path to DSEC root (contains train/test splits).")
+    parser.add_argument("--dataset_root", type=Path, help="Alias of --dsec_root for naming consistency.")
     parser.add_argument("--splits", nargs="+", default=["train", "test"], help="Split names for --dsec_root mode.")
     parser.add_argument("--output_name", type=str, default="events_2x.h5",
                         help="Output filename per sequence in --dsec_root mode.")
@@ -469,14 +518,18 @@ if __name__ == "__main__":
     args = parser.parse_args()
 
     is_single_mode = args.input_path is not None or args.output_path is not None
-    is_root_mode = args.dsec_root is not None
+    root_dir = args.dataset_root if args.dataset_root is not None else args.dsec_root
+    is_root_mode = root_dir is not None
 
     if is_single_mode and is_root_mode:
-        parser.error("Use either single-file mode (--input_path/--output_path) or root mode (--dsec_root), not both.")
+        parser.error(
+            "Use either single-file mode (--input_path/--output_path) "
+            "or root mode (--dataset_root/--dsec_root), not both."
+        )
 
     if is_root_mode:
-        process_dsec_root(
-            dsec_root=args.dsec_root,
+        process_dataset_root(
+            dataset_root=root_dir,
             splits=args.splits,
             output_name=args.output_name,
             overwrite=args.overwrite,
