@@ -182,6 +182,8 @@ class DSECVoxelBatchProvider:
         sensor_height: int,
         sensor_width: int,
         rescale_to_voxel_grid: bool,
+        downsample: bool = False,
+        downsample_event_file: str = "events_2x.h5",
         distributed: bool = False,
         rank: int = 0,
         world_size: int = 1,
@@ -204,6 +206,8 @@ class DSECVoxelBatchProvider:
             limit_samples=limit_samples,
             sensor_height=sensor_height,
             sensor_width=sensor_width,
+            downsample=downsample,
+            downsample_event_file=downsample_event_file,
         )
 
         collator = DSECVoxelCollator(

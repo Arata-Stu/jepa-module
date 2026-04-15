@@ -137,6 +137,8 @@ class DSECEventsDataset(Dataset):
         limit_samples: int | None = None,
         sensor_height: int = 480,
         sensor_width: int = 640,
+        downsample: bool = False,
+        downsample_event_file: str = "events_2x.h5",
     ):
         super().__init__()
         if split not in {"train", "val", "test"}:
@@ -160,10 +162,19 @@ class DSECEventsDataset(Dataset):
         self.load_labels = load_labels
         self.sensor_height = sensor_height
         self.sensor_width = sensor_width
+        self.downsample = downsample
+        self.downsample_event_file = str(downsample_event_file)
+        if len(self.downsample_event_file.strip()) == 0:
+            raise ValueError("downsample_event_file must be a non-empty filename")
 
         self._split_cfg = _load_split_config(split_config)
         self._sequences = self._build_sequence_infos()
         self._index = self._build_global_index(limit_samples=limit_samples)
+
+    def _resolve_event_file(self, seq_dir: Path) -> Path:
+        events_dir = seq_dir / "events" / "left"
+        filename = self.downsample_event_file if self.downsample else "events.h5"
+        return events_dir / filename
 
     def _resolve_split_root(self) -> Path:
         if self.split in {"train", "val"}:
@@ -228,7 +239,7 @@ class DSECEventsDataset(Dataset):
                         f"{seq_dir.name}: {len(image_files)} vs {int(timestamps.shape[0])}"
                     )
 
-            event_file = seq_dir / "events" / "left" / "events.h5"
+            event_file = self._resolve_event_file(seq_dir)
             if self.load_events and not event_file.exists():
                 raise FileNotFoundError(f"DSEC event file not found: {event_file}")
 

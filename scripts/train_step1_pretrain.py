@@ -238,6 +238,9 @@ def build_batch_provider(
             split_config_abs = to_absolute_path(str(split_config))
             ensure_path_exists(split_config_abs, "DSEC split_config")
 
+        downsample = bool(cfg.data.dsec.get("downsample", False))
+        downsample_event_file = str(cfg.data.dsec.get("downsample_event_file", "events_2x.h5"))
+
         return DSECVoxelBatchProvider(
             root_dir=root_dir_abs,
             split=split,
@@ -257,6 +260,8 @@ def build_batch_provider(
             sensor_height=int(cfg.data.dsec.sensor_height),
             sensor_width=int(cfg.data.dsec.sensor_width),
             rescale_to_voxel_grid=bool(cfg.data.dsec.rescale_to_voxel_grid),
+            downsample=downsample,
+            downsample_event_file=downsample_event_file,
             distributed=dist_state.enabled,
             rank=dist_state.rank,
             world_size=dist_state.world_size,
@@ -344,6 +349,9 @@ def build_eval_batch_provider(
             split_config_abs = to_absolute_path(str(split_config))
             ensure_path_exists(split_config_abs, "DSEC split_config")
 
+        downsample = bool(cfg.data.dsec.get("downsample", False))
+        downsample_event_file = str(cfg.data.dsec.get("downsample_event_file", "events_2x.h5"))
+
         return DSECVoxelBatchProvider(
             root_dir=root_dir_abs,
             split=split,
@@ -363,6 +371,8 @@ def build_eval_batch_provider(
             sensor_height=int(cfg.data.dsec.sensor_height),
             sensor_width=int(cfg.data.dsec.sensor_width),
             rescale_to_voxel_grid=bool(cfg.data.dsec.rescale_to_voxel_grid),
+            downsample=downsample,
+            downsample_event_file=downsample_event_file,
             distributed=dist_state.enabled,
             rank=dist_state.rank,
             world_size=dist_state.world_size,
@@ -606,6 +616,9 @@ def maybe_validate_cfg(cfg: DictConfig) -> None:
             raise ValueError(
                 "Step1 pretraining requires events. Set data.dsec.load_events=true."
             )
+        downsample_event_file = str(cfg.data.dsec.get("downsample_event_file", "events_2x.h5"))
+        if len(downsample_event_file.strip()) == 0:
+            raise ValueError("data.dsec.downsample_event_file must be non-empty")
 
     if bool(cfg.eval.enabled):
         if int(cfg.eval.every) < 1:

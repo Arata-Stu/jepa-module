@@ -123,6 +123,8 @@ data:
     split_config: null  # optional YAML path (required when split=val in official layout)
     sync: back  # front | back
     image_view: distorted  # distorted | rectified
+    downsample: false  # false: events.h5, true: downsample_event_file
+    downsample_event_file: events_2x.h5
 
     load_events: true
     load_rgb: false
