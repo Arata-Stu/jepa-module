@@ -412,18 +412,36 @@ def _normalized_output_suffix(output_suffix: str) -> str:
     return suffix
 
 
+def _normalized_output_subdir(output_subdir: str | None) -> str | None:
+    if output_subdir is None:
+        return None
+
+    subdir = output_subdir.strip().strip("/\\")
+    if len(subdir) == 0:
+        return None
+
+    subdir_path = Path(subdir)
+    if subdir_path.is_absolute() or any(part in {".", ".."} for part in subdir_path.parts):
+        raise ValueError("--output_subdir must be a relative path without '.' or '..'")
+    return str(subdir_path)
+
+
 def _build_output_path(
     input_path: Path,
     dataset_root: Path,
     output_root: Path | None,
     normalized_suffix: str,
+    normalized_output_subdir: str | None,
 ) -> Path:
     output_name = f"{input_path.stem}{normalized_suffix}"
     if output_root is None:
-        return input_path.with_name(output_name)
+        output_dir = input_path.parent
+    else:
+        relative_input = input_path.relative_to(dataset_root)
+        output_dir = output_root / relative_input.parent
 
-    relative_input = input_path.relative_to(dataset_root)
-    output_dir = output_root / relative_input.parent
+    if normalized_output_subdir is not None:
+        output_dir = output_dir / normalized_output_subdir
     return output_dir / output_name
 
 
@@ -431,6 +449,7 @@ def process_dataset_root(
     dataset_root: Path,
     splits: list[str],
     output_suffix: str,
+    output_subdir: str | None,
     overwrite: bool,
     output_root: Path | None,
     input_height: int | None,
@@ -447,6 +466,7 @@ def process_dataset_root(
         raise ValueError("num_processes must be >= 1")
 
     normalized_suffix = _normalized_output_suffix(output_suffix)
+    normalized_output_subdir = _normalized_output_subdir(output_subdir)
     input_files = _find_h5_files(dataset_root=dataset_root, splits=splits, recursive=recursive)
     if len(input_files) == 0:
         raise FileNotFoundError(f"No .h5 files found under {dataset_root} for splits={splits}")
@@ -468,6 +488,7 @@ def process_dataset_root(
             dataset_root=dataset_root,
             output_root=output_root,
             normalized_suffix=normalized_suffix,
+            normalized_output_subdir=normalized_output_subdir,
         )
         if output_path.exists():
             if overwrite:
@@ -526,6 +547,8 @@ if __name__ == "__main__":
     parser.add_argument("--splits", nargs="+", default=["train", "test", "val"], help="Splits for --dataset_root mode")
     parser.add_argument("--output_suffix", type=str, default="_1mpx.h5",
                         help="Output suffix for --dataset_root mode (e.g. _1mpx.h5)")
+    parser.add_argument("--output_subdir", type=str, default=None,
+                        help="Optional output subdirectory under each target dir (e.g. 1x or 2x).")
     parser.add_argument("--output_root", type=Path, default=None,
                         help="Optional output root dir for --dataset_root mode (preserves relative split paths)")
     parser.add_argument("--overwrite", action="store_true", help="Overwrite existing output files")
@@ -559,6 +582,7 @@ if __name__ == "__main__":
             dataset_root=args.dataset_root,
             splits=args.splits,
             output_suffix=args.output_suffix,
+            output_subdir=args.output_subdir,
             overwrite=args.overwrite,
             output_root=args.output_root,
             input_height=args.input_height,

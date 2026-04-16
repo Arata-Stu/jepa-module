@@ -36,6 +36,7 @@ python scripts/downsample_1mpx.py \
 主なオプション:
 
 - `--output_root /path/to/out`: 出力先を別ディレクトリへ変更（相対構造を維持）
+- `--output_subdir 1x|2x`: 出力先の下に追加サブディレクトリを作成して分離
 - `--recursive`: split 配下を再帰探索
 - `--overwrite`: 既存出力を上書き
 - `--tmp_suffix .tmp`: 一時ファイルの suffix
@@ -140,6 +141,7 @@ python scripts/downsample_n_imagenet.py \
 - `--time_scale`: 秒単位 timestamp を us へ変換する倍率（既定: `1e6`）
 - `--scale`: 整数スケール指定（`1` は変換のみ、`2` は 1/2 downsample）
 - `--output_root`: 別ディレクトリへ出力（相対構造を維持）
+- `--output_subdir`: 出力先の下に追加サブディレクトリを作成（例: `1x`, `2x`）
 - `--overwrite`: 既存出力を上書き
 - `--no_recursive`: split 配下の再帰探索を無効化（既定は再帰探索ON）
 - `--tmp_suffix`: 中断再開用 tmp suffix
