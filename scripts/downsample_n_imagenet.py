@@ -693,13 +693,13 @@ if __name__ == "__main__":
     parser.add_argument(
         "--dataset_root",
         type=Path,
-        help="Dataset root with train/test/val split dirs (root mode)",
+        help="Dataset root with split dirs like training/validation (root mode)",
     )
     parser.add_argument(
         "--splits",
         nargs="+",
-        default=["train", "test", "val"],
-        help="Splits for --dataset_root mode",
+        default=["training", "validation"],
+        help="Split directories for --dataset_root mode",
     )
 
     parser.add_argument(
@@ -729,7 +729,19 @@ if __name__ == "__main__":
         help="Optional output root dir for root/list modes (preserves relative paths)",
     )
     parser.add_argument("--overwrite", action="store_true", help="Overwrite existing output files")
-    parser.add_argument("--recursive", action="store_true", help="Recursively search .npz under split dirs")
+    parser.add_argument(
+        "--recursive",
+        dest="recursive",
+        action="store_true",
+        default=True,
+        help="Recursively search .npz under split dirs (default: enabled)",
+    )
+    parser.add_argument(
+        "--no_recursive",
+        dest="recursive",
+        action="store_false",
+        help="Disable recursive search under split dirs",
+    )
     parser.add_argument(
         "--tmp_suffix",
         type=str,

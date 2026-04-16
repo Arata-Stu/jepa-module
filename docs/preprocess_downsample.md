@@ -88,9 +88,21 @@ python scripts/downsample_n_imagenet.py \
   --output_width 320
 ```
 
-### list file 一括処理（推奨）
+### dataset root 一括処理
 
-既存の `train_list.txt` / `val_list.txt` をそのまま使えます。
+`dataset_root/<split>/` 配下を再帰探索して `.npz` を処理します。  
+`training/part_1/.../*.npz` や `validation/extracted_val_*/*/*.npz` のような任意名の深い階層も対象です。
+
+```bash
+python scripts/downsample_n_imagenet.py \
+  --dataset_root /path/to/n_imagenet_root \
+  --splits training validation \
+  --num_processes 4
+```
+
+### list file 一括処理（任意）
+
+既存の `train_list.txt` / `val_list.txt` を使う場合はこちらです。
 
 ```bash
 python scripts/downsample_n_imagenet.py \
@@ -101,27 +113,17 @@ python scripts/downsample_n_imagenet.py \
   --num_processes 4
 ```
 
-### dataset root 一括処理
-
-`dataset_root/<split>/` 配下の `.npz` を探索して処理します。
-
-```bash
-python scripts/downsample_n_imagenet.py \
-  --dataset_root /path/to/n_imagenet_root \
-  --splits train val test \
-  --recursive \
-  --num_processes 4
-```
-
 主なオプション:
 
 - `--compressed` / `--uncompressed`: npz 格納形式の読み分け
 - `--time_scale`: 秒単位 timestamp を us へ変換する倍率（既定: `1e6`）
 - `--output_root`: 別ディレクトリへ出力（相対構造を維持）
 - `--overwrite`: 既存出力を上書き
+- `--no_recursive`: split 配下の再帰探索を無効化（既定は再帰探索ON）
 - `--tmp_suffix`: 中断再開用 tmp suffix
 - `--num_events_per_chunk`: チャンクサイズ
 - `--write_ms_to_idx`: 出力 H5 に `ms_to_idx` を書く
+- `--skip_bad_inputs`: CRC/zip エラーの破損 npz をスキップして処理継続
 
 ## 既存出力と再実行
 
@@ -149,3 +151,45 @@ data:
 
 - `.npz`: 既存フォーマット（`event_data` または `x_pos/y_pos/timestamp/polarity`）
 - `.h5`: `events/x,y,p,t`（この前処理スクリプトの出力）
+
+## 読み込み速度ベンチマーク（N-ImageNet）
+
+`scripts/benchmark_n_imagenet_load.py` で、`npz` と downsample 後 `h5` の全件ロード時間を比較できます。
+
+### 例1: 同じ list から h5 パスを自動導出
+
+```bash
+python scripts/benchmark_n_imagenet_load.py \
+  --npz_list_files /path/to/train_list.txt /path/to/val_list.txt \
+  --npz_root /path/to/N_Imagenet \
+  --h5_root /path/to/N_Imagenet_h5 \
+  --h5_suffix _2x.h5 \
+  --trials 1
+```
+
+### 例2: npz/h5 それぞれの list を指定
+
+```bash
+python scripts/benchmark_n_imagenet_load.py \
+  --npz_list_files /path/to/train_npz_list.txt \
+  --h5_list_files /path/to/train_h5_list.txt \
+  --trials 3
+```
+
+### 例3: list なしで root を再帰探索
+
+```bash
+python scripts/benchmark_n_imagenet_load.py \
+  --npz_dataset_root /path/to/N_Imagenet \
+  --h5_dataset_root /path/to/N_Imagenet_h5 \
+  --splits training validation \
+  --h5_suffix _2x.h5 \
+  --trials 1
+```
+
+主なオプション:
+
+- `--skip_missing`: 欠損ファイルをスキップ
+- `--skip_errors`: 読み込み失敗ファイルをスキップ
+- `--no_recursive`: root モードで再帰探索を無効化（既定は再帰探索ON）
+- `--no_progress`: 進捗表示を無効化
