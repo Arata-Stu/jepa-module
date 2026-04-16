@@ -184,6 +184,7 @@ python scripts/benchmark_n_imagenet_load.py \
   --h5_dataset_root /path/to/N_Imagenet_h5 \
   --splits training validation \
   --h5_suffix _2x.h5 \
+  --max_files 2000 \
   --trials 1
 ```
 
@@ -193,3 +194,6 @@ python scripts/benchmark_n_imagenet_load.py \
 - `--skip_errors`: 読み込み失敗ファイルをスキップ
 - `--no_recursive`: root モードで再帰探索を無効化（既定は再帰探索ON）
 - `--no_progress`: 進捗表示を無効化
+- `--max_files`: 1データセットあたりの最大ファイル数（短時間ベンチ用）
+- `--sample_mode head|random`: `max_files` 適用時の選び方
+- `--seed`: `sample_mode=random` の乱数シード
