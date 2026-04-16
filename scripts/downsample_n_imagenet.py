@@ -115,13 +115,29 @@ def _resolve_input_resolution(
     return int(resolved_height), int(resolved_width)
 
 
+def _infer_class_synset(input_path: Path) -> str | None:
+    class_synset = input_path.parent.name.strip()
+    if len(class_synset) == 0:
+        return None
+    return class_synset
+
+
 class H5Writer:
-    def __init__(self, outfile: Path, out_height: int, out_width: int):
+    def __init__(
+        self,
+        outfile: Path,
+        out_height: int,
+        out_width: int,
+        class_synset: str | None = None,
+    ):
         assert not outfile.exists(), f"Output already exists: {outfile}"
 
         self.h5f = h5py.File(str(outfile), "w")
         self._finalizer = weakref.finalize(self, self.close_callback, self.h5f)
         self.num_events = 0
+
+        if class_synset is not None:
+            self.h5f.attrs["class_synset"] = class_synset
 
         events = self.h5f.create_group("events")
         shape = (2**16,)
@@ -233,6 +249,19 @@ def _process_chunk(
     return downsampled_events, change_map
 
 
+def _slice_chunk_events(
+    events: dict[str, np.ndarray],
+    start_idx: int,
+    end_idx: int,
+) -> dict[str, np.ndarray]:
+    return {
+        "x": events["x"][start_idx:end_idx],
+        "y": events["y"][start_idx:end_idx],
+        "p": events["p"][start_idx:end_idx],
+        "t": events["t"][start_idx:end_idx],
+    }
+
+
 def _tmp_output_path(output_path: Path, tmp_suffix: str) -> Path:
     return output_path.with_name(f"{output_path.name}{tmp_suffix}")
 
@@ -266,6 +295,7 @@ def process_single_file(
     tmp_suffix: str,
     compressed: bool,
     time_scale: float,
+    downsample_factor: int | None,
 ) -> None:
     output_path.parent.mkdir(parents=True, exist_ok=True)
     tmp_output_path = _tmp_output_path(output_path=output_path, tmp_suffix=tmp_suffix)
@@ -281,7 +311,26 @@ def process_single_file(
         input_height=input_height,
         input_width=input_width,
     )
-    _scale_factors(resolved_input_height, resolved_input_width, output_height, output_width)
+
+    resolved_output_height = int(output_height)
+    resolved_output_width = int(output_width)
+    if downsample_factor is not None:
+        factor = int(downsample_factor)
+        if factor < 1:
+            raise ValueError("--scale must be >= 1")
+        resolved_output_height = resolved_input_height // factor
+        resolved_output_width = resolved_input_width // factor
+
+    _scale_factors(
+        resolved_input_height,
+        resolved_input_width,
+        resolved_output_height,
+        resolved_output_width,
+    )
+    is_identity = (
+        resolved_input_height == resolved_output_height
+        and resolved_input_width == resolved_output_width
+    )
 
     num_events = int(len(events["t"]))
     num_events_per_chunk = max(1, int(num_events_per_chunk))
@@ -292,39 +341,51 @@ def process_single_file(
     writer = None
     pbar = tqdm.tqdm(total=total_steps, leave=False, desc=input_path.name) if show_progress else None
     try:
-        writer = H5Writer(tmp_output_path, out_height=output_height, out_width=output_width)
+        class_synset = _infer_class_synset(input_path=input_path)
+        writer = H5Writer(
+            tmp_output_path,
+            out_height=resolved_output_height,
+            out_width=resolved_output_width,
+            class_synset=class_synset,
+        )
         change_map = None
 
         for i in range(num_full_chunks):
             start_idx = i * num_events_per_chunk
             end_idx = (i + 1) * num_events_per_chunk
-            downsampled_events, change_map = _process_chunk(
-                events=events,
-                start_idx=start_idx,
-                end_idx=end_idx,
-                input_height=resolved_input_height,
-                input_width=resolved_input_width,
-                output_height=output_height,
-                output_width=output_width,
-                change_map=change_map,
-            )
-            writer.add_data(downsampled_events)
+            if is_identity:
+                writer.add_data(_slice_chunk_events(events=events, start_idx=start_idx, end_idx=end_idx))
+            else:
+                downsampled_events, change_map = _process_chunk(
+                    events=events,
+                    start_idx=start_idx,
+                    end_idx=end_idx,
+                    input_height=resolved_input_height,
+                    input_width=resolved_input_width,
+                    output_height=resolved_output_height,
+                    output_width=resolved_output_width,
+                    change_map=change_map,
+                )
+                writer.add_data(downsampled_events)
             if pbar is not None:
                 pbar.update(1)
 
         if has_remainder:
             start_idx = num_full_chunks * num_events_per_chunk
-            downsampled_events, change_map = _process_chunk(
-                events=events,
-                start_idx=start_idx,
-                end_idx=num_events,
-                input_height=resolved_input_height,
-                input_width=resolved_input_width,
-                output_height=output_height,
-                output_width=output_width,
-                change_map=change_map,
-            )
-            writer.add_data(downsampled_events)
+            if is_identity:
+                writer.add_data(_slice_chunk_events(events=events, start_idx=start_idx, end_idx=num_events))
+            else:
+                downsampled_events, change_map = _process_chunk(
+                    events=events,
+                    start_idx=start_idx,
+                    end_idx=num_events,
+                    input_height=resolved_input_height,
+                    input_width=resolved_input_width,
+                    output_height=resolved_output_height,
+                    output_width=resolved_output_width,
+                    change_map=change_map,
+                )
+                writer.add_data(downsampled_events)
             if pbar is not None:
                 pbar.update(1)
 
@@ -355,6 +416,7 @@ def _process_file_with_retry(
     tmp_suffix: str,
     compressed: bool,
     time_scale: float,
+    downsample_factor: int | None,
 ) -> tuple[bool, str | None]:
     stale_tmp_path = _tmp_output_path(output_path=output_path, tmp_suffix=tmp_suffix)
     if not _cleanup_tmp_file(tmp_path=stale_tmp_path, context=f"resume prep for {input_path}", strict=False):
@@ -375,6 +437,7 @@ def _process_file_with_retry(
                 tmp_suffix=tmp_suffix,
                 compressed=compressed,
                 time_scale=time_scale,
+                downsample_factor=downsample_factor,
             )
             return True, None
         except Exception as exc:
@@ -407,6 +470,7 @@ def _worker_process_file(job: dict) -> tuple[str, bool, str | None]:
         tmp_suffix=job["tmp_suffix"],
         compressed=job["compressed"],
         time_scale=job["time_scale"],
+        downsample_factor=job["downsample_factor"],
     )
     return str(input_path), ok, err
 
@@ -561,6 +625,7 @@ def process_dataset_root(
     num_processes: int,
     compressed: bool,
     time_scale: float,
+    downsample_factor: int | None,
 ) -> None:
     normalized_suffix = _normalized_output_suffix(output_suffix)
     input_files = _find_npz_files(dataset_root=dataset_root, splits=splits, recursive=recursive)
@@ -599,6 +664,7 @@ def process_dataset_root(
                 "tmp_suffix": tmp_suffix,
                 "compressed": compressed,
                 "time_scale": time_scale,
+                "downsample_factor": downsample_factor,
             }
         )
 
@@ -625,6 +691,7 @@ def process_list_files(
     num_processes: int,
     compressed: bool,
     time_scale: float,
+    downsample_factor: int | None,
 ) -> None:
     normalized_suffix = _normalized_output_suffix(output_suffix)
     inputs_with_rel = _collect_inputs_from_list_files(list_files=list_files, root_dir=root_dir)
@@ -673,6 +740,7 @@ def process_list_files(
                 "tmp_suffix": tmp_suffix,
                 "compressed": compressed,
                 "time_scale": time_scale,
+                "downsample_factor": downsample_factor,
             }
         )
 
@@ -774,6 +842,12 @@ if __name__ == "__main__":
         default=1_000_000.0,
         help="Scale factor when timestamps look like seconds.",
     )
+    parser.add_argument(
+        "--scale",
+        type=int,
+        default=None,
+        help="Optional integer scale factor. 1 means conversion-only (npz -> h5), 2 means 1/2 downsample.",
+    )
 
     parser.add_argument("--input_height", type=int, default=480, help="Input event height")
     parser.add_argument("--input_width", type=int, default=640, help="Input event width")
@@ -833,6 +907,7 @@ if __name__ == "__main__":
             tmp_suffix=args.tmp_suffix,
             compressed=bool(args.compressed),
             time_scale=float(args.time_scale),
+            downsample_factor=args.scale,
         )
     elif is_root_mode:
         process_dataset_root(
@@ -852,6 +927,7 @@ if __name__ == "__main__":
             num_processes=args.num_processes,
             compressed=bool(args.compressed),
             time_scale=float(args.time_scale),
+            downsample_factor=args.scale,
         )
     else:
         process_list_files(
@@ -870,4 +946,5 @@ if __name__ == "__main__":
             num_processes=args.num_processes,
             compressed=bool(args.compressed),
             time_scale=float(args.time_scale),
+            downsample_factor=args.scale,
         )
