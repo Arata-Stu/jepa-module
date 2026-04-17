@@ -174,7 +174,11 @@ def _process_chunk(
     change_map,
 ):
     events = extract_from_h5_by_index(input_path, start_idx, end_idx)
-    events["p"] = 2 * events["p"].astype("int8") - 1
+    # Normalize input polarity to signed {-1, +1}.
+    # This supports both source conventions:
+    # - binary {0, 1}
+    # - signed {-1, +1}
+    events["p"] = np.where(events["p"] > 0, 1, -1).astype("int8", copy=False)
     downsampled_events, change_map = downsample_events(
         events,
         input_height=input_height,
@@ -183,7 +187,7 @@ def _process_chunk(
         output_width=output_width,
         change_map=change_map,
     )
-    downsampled_events["p"] = ((downsampled_events["p"] + 1) // 2).astype("uint8")
+    downsampled_events["p"] = (downsampled_events["p"] > 0).astype("uint8", copy=False)
     return downsampled_events, change_map
 
 
