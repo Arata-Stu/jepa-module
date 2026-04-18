@@ -5,8 +5,8 @@ model_size: tiny
 
 device: auto
 seed: 42
-steps: 200
-batch_size: 8
+steps: 1000000
+batch_size: 16
 
 lr: 1.0e-4
 weight_decay: 0.04
@@ -132,8 +132,8 @@ data:
 
     dsec:
       enabled: true
-      root_dir: ./dsec-downsampled
-      manifest_file: null  # optional path list (.txt/.csv/.npy). When set, avoids directory scan.
+      root_dir: /media/aten-22/AT_2TB/dataset/dsec-downsampled
+      manifest_file: manifests/dsec_train.txt  # optional path list (.txt/.csv/.npy). When set, avoids directory scan.
       splits: [train]
       recursive: true
       file_name: events_2x.h5
@@ -143,8 +143,8 @@ data:
 
     gen4:
       enabled: true
-      root_dir: ./gen4-downsampled
-      manifest_file: null  # optional path list (.txt/.csv/.npy). When set, avoids directory scan.
+      root_dir: /media/aten-22/AT_2TB/dataset/gen4-downsampled
+      manifest_file: manifests/gen4_train.txt  # optional path list (.txt/.csv/.npy). When set, avoids directory scan.
       splits: [train]
       recursive: true
       file_name: null
@@ -154,8 +154,8 @@ data:
 
     n_imagenet:
       enabled: true
-      root_dir: ./n-imagenet-downsample
-      manifest_file: null  # optional path list (.txt/.csv/.npy). When set, avoids directory scan.
+      root_dir: /media/aten-22/AT_2TB/dataset/n-imagenet-downsample
+      manifest_file: manifests/n_imagenet_training.txt  # optional path list (.txt/.csv/.npy). When set, avoids directory scan.
       splits: [training]
       recursive: true
       file_name: null

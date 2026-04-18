@@ -494,6 +494,9 @@ def build_batch_provider(
         window_duration_us_max = mixed_cfg.get("window_duration_us_max", None)
         duration_sources = tuple(str(s) for s in mixed_cfg.get("duration_sources", ["dsec", "gen4"]))
         prefer_ms_to_idx = bool(mixed_cfg.get("prefer_ms_to_idx", True))
+        debug_index_check = bool(mixed_cfg.get("debug_index_check", False))
+        debug_raise_on_oob = bool(mixed_cfg.get("debug_raise_on_oob", False))
+        debug_log_limit = int(mixed_cfg.get("debug_log_limit", 20))
 
         return PretrainMixedVoxelBatchProvider(
             source_configs=source_configs,
@@ -521,6 +524,9 @@ def build_batch_provider(
             canvas_height=int(mixed_cfg.canvas_height),
             canvas_width=int(mixed_cfg.canvas_width),
             center_pad_to_canvas=bool(mixed_cfg.center_pad_to_canvas),
+            debug_index_check=debug_index_check,
+            debug_raise_on_oob=debug_raise_on_oob,
+            debug_log_limit=debug_log_limit,
             distributed=dist_state.enabled,
             rank=dist_state.rank,
             world_size=dist_state.world_size,
@@ -999,6 +1005,8 @@ def maybe_validate_cfg(cfg: DictConfig) -> None:
             raise ValueError("data.pretrain_mixed.canvas_height/width must be >= 1")
         if mixed_cfg.epoch_size is not None and int(mixed_cfg.epoch_size) < 1:
             raise ValueError("data.pretrain_mixed.epoch_size must be >= 1 when set")
+        if int(mixed_cfg.get("debug_log_limit", 20)) < 1:
+            raise ValueError("data.pretrain_mixed.debug_log_limit must be >= 1")
 
         active_sources: list[str] = []
         allowed_source_names = {"dsec", "gen4", "n_imagenet"}

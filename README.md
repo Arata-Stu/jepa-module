@@ -134,6 +134,8 @@ python scripts/train_step1_pretrain.py \
 - `events_per_sample_*` はイベント数ベースの可変切り出しです。
 - `t_bins=10 + temporal_mix.short_t=1` で 10bin/1bin を学習中に混在できます。
 - H5読み込み失敗時は別サンプルへ自動リトライし、worker が落ちにくい挙動にしています。
+- 範囲外 index の追跡は `data.pretrain_mixed.debug_index_check=true` で有効化できます。
+  詳細を即停止で見たいときは `data.pretrain_mixed.debug_raise_on_oob=true` を併用します。
 - DataLoader 周りで `pin_memory` スレッドのエラーが出る場合は、まず
   `data.num_workers=0 data.pin_memory=false` で安定動作を確認し、その後 `num_workers` を増やしてください。
 

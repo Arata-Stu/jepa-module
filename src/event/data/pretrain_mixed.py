@@ -560,6 +560,9 @@ class PretrainMixedVoxelCollator:
         canvas_height: int = 240,
         canvas_width: int = 320,
         center_pad_to_canvas: bool = True,
+        debug_index_check: bool = False,
+        debug_raise_on_oob: bool = False,
+        debug_log_limit: int = 20,
     ):
         self.voxel_builder = voxel_builder
         self.normalize_voxel = normalize_voxel
@@ -567,6 +570,10 @@ class PretrainMixedVoxelCollator:
         self.canvas_height = int(canvas_height)
         self.canvas_width = int(canvas_width)
         self.center_pad_to_canvas = bool(center_pad_to_canvas)
+        self.debug_index_check = bool(debug_index_check)
+        self.debug_raise_on_oob = bool(debug_raise_on_oob)
+        self.debug_log_limit = max(1, int(debug_log_limit))
+        self._debug_logged = 0
 
     def _empty_voxel(self) -> torch.Tensor:
         return torch.zeros(
@@ -599,6 +606,126 @@ class PretrainMixedVoxelCollator:
         x_scaled = torch.floor(x.float() * (self.canvas_width / float(sensor_w))).long()
         y_scaled = torch.floor(y.float() * (self.canvas_height / float(sensor_h))).long()
         return x_scaled, y_scaled, self.canvas_height, self.canvas_width
+
+    @staticmethod
+    def _minmax(t: torch.Tensor) -> str:
+        if t.numel() == 0:
+            return "empty"
+        return f"{int(t.min().item())}..{int(t.max().item())}"
+
+    def _debug_log_oob(
+        self,
+        *,
+        sample: dict[str, Any],
+        x: torch.Tensor,
+        y: torch.Tensor,
+        time: torch.Tensor,
+        t0_center: int | None,
+        t1_center: int | None,
+        oob_count: int,
+        extra: str = "",
+    ) -> None:
+        if self._debug_logged >= self.debug_log_limit:
+            return
+        msg = (
+            "[pretrain_mixed][debug_oob] "
+            f"source={sample.get('source')} path={sample.get('path')} "
+            f"events={int(x.numel())} "
+            f"x={self._minmax(x)} y={self._minmax(y)} t={self._minmax(time)} "
+            f"t0={t0_center} t1={t1_center} "
+            f"bins={self.voxel_builder.time_bins} h={self.voxel_builder.height} w={self.voxel_builder.width} "
+            f"oob_count={oob_count}"
+        )
+        if len(extra) > 0:
+            msg += f" {extra}"
+        print(msg)
+        self._debug_logged += 1
+
+    def _debug_check_flat_indices(
+        self,
+        *,
+        sample: dict[str, Any],
+        x: torch.Tensor,
+        y: torch.Tensor,
+        time: torch.Tensor,
+        t0_center: int | None,
+        t1_center: int | None,
+    ) -> None:
+        if not self.debug_index_check:
+            return
+        if x.numel() == 0:
+            return
+
+        ch = int(self.voxel_builder.time_bins)
+        ht = int(self.voxel_builder.height)
+        wd = int(self.voxel_builder.width)
+        total = ch * ht * wd
+
+        if ch == 1:
+            idx = wd * y.long() + x.long()
+            bad = (idx < 0) | (idx >= total)
+            bad_count = int(bad.sum().item())
+            if bad_count > 0:
+                self._debug_log_oob(
+                    sample=sample,
+                    x=x,
+                    y=y,
+                    time=time,
+                    t0_center=t0_center,
+                    t1_center=t1_center,
+                    oob_count=bad_count,
+                    extra=f"idx={self._minmax(idx)}",
+                )
+                if self.debug_raise_on_oob:
+                    raise RuntimeError(
+                        "debug_index_check caught OOB flat indices in PretrainMixedVoxelCollator (ch=1)"
+                    )
+            return
+
+        if t0_center is None or t1_center is None:
+            return
+
+        if t1_center <= t0_center:
+            t1_center = t0_center + 1
+
+        t_norm = (
+            (time.to(torch.float32) - float(t0_center))
+            / float(t1_center - t0_center)
+            * float(ch - 1)
+        )
+        t0 = torch.floor(t_norm).to(torch.int64)
+        bad_total = 0
+        for offset in (0, 1):
+            tlim = t0 + int(offset)
+            mask = (
+                (x >= 0)
+                & (x < wd)
+                & (y >= 0)
+                & (y < ht)
+                & (tlim >= 0)
+                & (tlim < ch)
+            )
+            if not bool(torch.any(mask)):
+                continue
+            idx = ht * wd * tlim + wd * y.long() + x.long()
+            bad = mask & ((idx < 0) | (idx >= total))
+            bad_total += int(bad.sum().item())
+
+        if bad_total > 0:
+            self._debug_log_oob(
+                sample=sample,
+                x=x,
+                y=y,
+                time=time,
+                t0_center=t0_center,
+                t1_center=t1_center,
+                oob_count=bad_total,
+                extra=f"t_norm={float(t_norm.min().item()):.4f}..{float(t_norm.max().item()):.4f}",
+            )
+            if self.debug_raise_on_oob:
+                raise RuntimeError(
+                    "debug_index_check caught OOB flat indices in PretrainMixedVoxelCollator (ch>1)"
+                )
 
     def _to_voxel(self, sample: dict[str, Any]) -> torch.Tensor:
         x = sample["x"].long()
@@ -666,7 +793,28 @@ class PretrainMixedVoxelCollator:
                 time = time.clone()
                 time[-1] = time[0] + 1
 
-        voxel = self.voxel_builder.convert(x=x, y=y, pol=pol, time=time)
+        t0_center = int(torch.min(time).item()) if time.numel() > 0 else None
+        t1_center = int(torch.max(time).item()) if time.numel() > 0 else None
+        if t0_center is not None and t1_center is not None and t1_center <= t0_center:
+            t1_center = t0_center + 1
+
+        self._debug_check_flat_indices(
+            sample=sample,
+            x=x,
+            y=y,
+            time=time,
+            t0_center=t0_center,
+            t1_center=t1_center,
+        )
+
+        voxel = self.voxel_builder.convert(
+            x=x,
+            y=y,
+            pol=pol,
+            time=time,
+            t0_center=t0_center,
+            t1_center=t1_center,
+        )
         if self.normalize_voxel:
             voxel = norm_voxel_grid(voxel)
         return voxel
@@ -717,6 +865,9 @@ class PretrainMixedVoxelBatchProvider:
         canvas_height: int = 240,
         canvas_width: int = 320,
         center_pad_to_canvas: bool = True,
+        debug_index_check: bool = False,
+        debug_raise_on_oob: bool = False,
+        debug_log_limit: int = 20,
         distributed: bool = False,
         rank: int = 0,
         world_size: int = 1,
@@ -746,6 +897,9 @@ class PretrainMixedVoxelBatchProvider:
             canvas_height=canvas_height,
             canvas_width=canvas_width,
             center_pad_to_canvas=center_pad_to_canvas,
+            debug_index_check=debug_index_check,
+            debug_raise_on_oob=debug_raise_on_oob,
+            debug_log_limit=debug_log_limit,
         )
 
         self.sampler = None

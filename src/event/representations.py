@@ -98,12 +98,26 @@ class VoxelGrid(EventRepresentation):
         ch, ht, wd = self.time_bins, self.height, self.width
         with torch.no_grad():
             value = 2*pol.float()-1
+            flat_size = voxel_grid.numel()
+
+            def _safe_put(index_tensor: torch.Tensor, weight_tensor: torch.Tensor, mask_tensor: torch.Tensor):
+                index_sel = index_tensor[mask_tensor].long()
+                if index_sel.numel() == 0:
+                    return
+                weight_sel = weight_tensor[mask_tensor]
+                valid = (index_sel >= 0) & (index_sel < flat_size)
+                if bool(torch.any(valid)):
+                    voxel_grid.put_(index_sel[valid], weight_sel[valid], accumulate=True)
 
             if ch == 1:
                 if is_int_xy:
                     mask = (x >= 0) & (x < wd) & (y >= 0) & (y < ht)
                     index = wd * y.long() + x.long()
-                    voxel_grid[0].put_(index[mask], value[mask], accumulate=True)
+                    index_sel = index[mask]
+                    if index_sel.numel() > 0:
+                        valid = (index_sel >= 0) & (index_sel < (ht * wd))
+                        if bool(torch.any(valid)):
+                            voxel_grid[0].put_(index_sel[valid], value[mask][valid], accumulate=True)
                 else:
                     x0 = x.floor().int()
                     y0 = y.floor().int()
@@ -112,11 +126,21 @@ class VoxelGrid(EventRepresentation):
                             mask = (xlim < wd) & (xlim >= 0) & (ylim < ht) & (ylim >= 0)
                             interp_weights = value * (1 - (xlim - x).abs()) * (1 - (ylim - y).abs())
                             index = wd * ylim.long() + xlim.long()
-                            voxel_grid[0].put_(index[mask], interp_weights[mask], accumulate=True)
+                            index_sel = index[mask]
+                            if index_sel.numel() > 0:
+                                valid = (index_sel >= 0) & (index_sel < (ht * wd))
+                                if bool(torch.any(valid)):
+                                    voxel_grid[0].put_(
+                                        index_sel[valid],
+                                        interp_weights[mask][valid],
+                                        accumulate=True,
+                                    )
                 return voxel_grid
 
             t0_center = t0_center if t0_center is not None else time[0]
             t1_center = t1_center if t1_center is not None else time[-1]
+            if int(t1_center) <= int(t0_center):
+                t1_center = int(t0_center) + 1
             t_norm = self._normalize_time(time, t0_center, t1_center)
 
             t0 = t_norm.floor().int()
@@ -130,7 +154,7 @@ class VoxelGrid(EventRepresentation):
                             wd * y.long() + \
                             x.long()
 
-                    voxel_grid.put_(index[mask], interp_weights[mask], accumulate=True)
+                    _safe_put(index, interp_weights, mask)
             else:
                 x0 = x.floor().int()
                 y0 = y.floor().int()
@@ -145,6 +169,6 @@ class VoxelGrid(EventRepresentation):
                                     wd * ylim.long() + \
                                     xlim.long()
 
-                            voxel_grid.put_(index[mask], interp_weights[mask], accumulate=True)
+                            _safe_put(index, interp_weights, mask)
 
         return voxel_grid
