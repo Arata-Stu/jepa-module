@@ -102,8 +102,8 @@ data:
 
     # Optional random time-window sampling (microseconds) for sequence sources.
     # Set both to enable duration-based slicing.
-    window_duration_us_min: 200000
-    window_duration_us_max: 1200000
+    window_duration_us_min: 10000 # 10ms
+    window_duration_us_max: 100000 # 100ms
     duration_sources: [dsec, gen4]
     prefer_ms_to_idx: true
 

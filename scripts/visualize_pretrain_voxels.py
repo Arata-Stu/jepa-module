@@ -252,6 +252,12 @@ def main(cfg: DictConfig) -> None:
     random.seed(seed)
     torch.manual_seed(seed)
 
+    if int(cfg.data.get("num_workers", 0)) > 0:
+        print(
+            "[visualize_pretrain_voxels] note: this script reads dataset directly "
+            "(no DataLoader workers). data.num_workers is ignored."
+        )
+
     runtime_dir = Path(HydraConfig.get().runtime.output_dir)
     out_dir = runtime_dir / out_subdir
     out_dir.mkdir(parents=True, exist_ok=True)
