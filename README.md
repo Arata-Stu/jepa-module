@@ -139,6 +139,19 @@ python scripts/train_step1_pretrain.py \
 - DataLoader 周りで `pin_memory` スレッドのエラーが出る場合は、まず
   `data.num_workers=0 data.pin_memory=false` で安定動作を確認し、その後 `num_workers` を増やしてください。
 
+### Event Voxel 可視化（赤青白）
+
+```bash
+source env/bin/activate
+python scripts/visualize_pretrain_voxels.py \
+  data.source=pretrain_mixed \
+  data.num_workers=0 \
+  visualize.num_samples=24
+```
+
+- 出力先: `outputs/train/.../.../event_viz/`
+- `index.csv` に `source` / 元ファイル `path` / 保存画像パスを出力します。
+
 ## Collapse Strategy 切り替え
 
 - `collapse_strategy=ema_stopgrad`: EMA teacher + stop-grad（デフォルト）
