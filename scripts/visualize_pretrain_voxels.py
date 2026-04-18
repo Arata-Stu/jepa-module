@@ -266,6 +266,9 @@ def main(cfg: DictConfig) -> None:
                 "image_path",
                 "source",
                 "sample_path",
+                "sample_events",
+                "sample_time_span_us",
+                "sample_time_span_sec",
                 "nonzero",
                 "voxel_min",
                 "voxel_max",
@@ -284,6 +287,13 @@ def main(cfg: DictConfig) -> None:
             inputs = batch["inputs"]
             if not isinstance(inputs, torch.Tensor):
                 raise TypeError("Batch must contain tensor in `inputs`.")
+
+            sample_time = sample["time"].detach().cpu() if isinstance(sample.get("time"), torch.Tensor) else None
+            sample_events = int(sample_time.numel()) if sample_time is not None else 0
+            sample_time_span_us = 0
+            if sample_time is not None and sample_time.numel() > 1:
+                sample_time_span_us = int(sample_time[-1].item() - sample_time[0].item())
+            sample_time_span_sec = float(sample_time_span_us) / 1.0e6
 
             voxel = _extract_voxel_tensor(inputs=inputs, batch_idx=0).detach().cpu().to(torch.float32)
             rgb = _voxel_to_rgb(voxel)
@@ -304,6 +314,9 @@ def main(cfg: DictConfig) -> None:
                     str(image_path),
                     sample_source,
                     sample_path,
+                    sample_events,
+                    sample_time_span_us,
+                    f"{sample_time_span_sec:.6f}",
                     int(torch.count_nonzero(voxel).item()),
                     float(voxel.min().item()) if voxel.numel() > 0 else 0.0,
                     float(voxel.max().item()) if voxel.numel() > 0 else 0.0,
