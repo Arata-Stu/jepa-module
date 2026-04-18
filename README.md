@@ -144,12 +144,12 @@ python scripts/train_step1_pretrain.py \
 ```bash
 source env/bin/activate
 python scripts/visualize_pretrain_voxels.py \
-  data.source=pretrain_mixed \
-  data.num_workers=0
+  data.source=pretrain_mixed
 ```
 
 - 出力先: `outputs/train/.../.../event_viz/`
 - `index.csv` に `source` / 元ファイル `path` / 保存画像パスを出力します。
+- この可視化スクリプトは DataLoader を使わず dataset を直接読むため、原因切り分け時に安定です。
 
 ## Collapse Strategy 切り替え
 

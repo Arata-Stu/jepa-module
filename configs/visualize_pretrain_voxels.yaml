@@ -5,4 +5,4 @@ defaults:
 visualize:
   num_samples: 24
   out_subdir: event_viz
-
+  weighted_sampling: true
