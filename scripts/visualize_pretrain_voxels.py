@@ -100,7 +100,7 @@ def _extract_voxel_tensor(inputs: torch.Tensor, batch_idx: int) -> torch.Tensor:
     raise ValueError(f"Unsupported input sample shape: {tuple(sample.shape)}")
 
 
-@hydra.main(version_base="1.3", config_path="../configs", config_name="train_step1")
+@hydra.main(version_base="1.3", config_path="../configs", config_name="visualize_pretrain_voxels")
 def main(cfg: DictConfig) -> None:
     maybe_validate_cfg(cfg)
     _configure_data_loader_runtime(cfg)
@@ -191,4 +191,3 @@ def main(cfg: DictConfig) -> None:
 
 if __name__ == "__main__":
     main()
-

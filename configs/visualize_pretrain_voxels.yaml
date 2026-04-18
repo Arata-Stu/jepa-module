@@ -1,0 +1,8 @@
+defaults:
+  - train_step1
+  - _self_
+
+visualize:
+  num_samples: 24
+  out_subdir: event_viz
+

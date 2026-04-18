@@ -145,8 +145,7 @@ python scripts/train_step1_pretrain.py \
 source env/bin/activate
 python scripts/visualize_pretrain_voxels.py \
   data.source=pretrain_mixed \
-  data.num_workers=0 \
-  visualize.num_samples=24
+  data.num_workers=0
 ```
 
 - 出力先: `outputs/train/.../.../event_viz/`
