@@ -155,6 +155,10 @@ class PretrainMixedEventsDataset(Dataset):
         window_duration_us_max: int | None = None,
         duration_sources: Sequence[str] | None = None,
         prefer_ms_to_idx: bool = True,
+        min_events_in_window: int = 1,
+        min_event_rate_eps: float | None = None,
+        activity_filter_sources: Sequence[str] | None = None,
+        max_window_attempts: int = 4,
     ):
         super().__init__()
         self.events_per_sample_min = int(events_per_sample_min)
@@ -170,6 +174,12 @@ class PretrainMixedEventsDataset(Dataset):
         )
         self.duration_sources = set(duration_sources or [])
         self.prefer_ms_to_idx = bool(prefer_ms_to_idx)
+        self.min_events_in_window = int(min_events_in_window)
+        self.min_event_rate_eps = (
+            None if min_event_rate_eps is None else float(min_event_rate_eps)
+        )
+        self.activity_filter_sources = set(activity_filter_sources or [])
+        self.max_window_attempts = max(1, int(max_window_attempts))
         self._max_read_retry = 8
         self._warn_budget = 20
         self._warned_read_errors = 0
@@ -178,6 +188,10 @@ class PretrainMixedEventsDataset(Dataset):
             raise ValueError("events_per_sample_min must be >= 1")
         if self.events_per_sample_max < self.events_per_sample_min:
             raise ValueError("events_per_sample_max must be >= events_per_sample_min")
+        if self.min_events_in_window < 1:
+            raise ValueError("min_events_in_window must be >= 1")
+        if self.min_event_rate_eps is not None and self.min_event_rate_eps <= 0.0:
+            raise ValueError("min_event_rate_eps must be > 0 when set")
         if (self.window_duration_us_min is None) != (self.window_duration_us_max is None):
             raise ValueError(
                 "window_duration_us_min and window_duration_us_max must be both set or both None"
@@ -376,10 +390,49 @@ class PretrainMixedEventsDataset(Dataset):
             )
         return self._sample_range_by_event_count(total_events=total_events)
 
+    def _activity_filter_enabled(self, source: str) -> bool:
+        if self.min_events_in_window <= 1 and self.min_event_rate_eps is None:
+            return False
+        if len(self.activity_filter_sources) == 0:
+            return True
+        return source in self.activity_filter_sources
+
+    def _passes_activity_filter(
+        self,
+        record: _EventFileRecord,
+        x: np.ndarray,
+        t: np.ndarray,
+    ) -> bool:
+        if not self._activity_filter_enabled(record.source):
+            return True
+
+        count = int(x.size)
+        if count < self.min_events_in_window:
+            return False
+
+        if self.min_event_rate_eps is not None:
+            if count <= 1:
+                return False
+            span_us = int(t[-1]) - int(t[0])
+            if span_us <= 0:
+                return False
+            event_rate_eps = float(count) * 1_000_000.0 / float(span_us)
+            if event_rate_eps < self.min_event_rate_eps:
+                return False
+
+        return True
+
     def _read_event_window(self, record: _EventFileRecord) -> dict[str, Any]:
         with _open_h5_for_read(record.path) as h5f:
             events = h5f["events"] if "events" in h5f else h5f
             total_events = int(events["t"].shape[0])
+            sensor_h, sensor_w = self._resolve_sensor_size(
+                h5f=h5f,
+                events_group=events,
+                fallback_height=record.sensor_height,
+                fallback_width=record.sensor_width,
+            )
+            t_offset = int(np.asarray(h5f["t_offset"][()]).item()) if "t_offset" in h5f else 0
 
             if total_events == 0:
                 x = np.zeros((0,), dtype=np.int64)
@@ -387,28 +440,55 @@ class PretrainMixedEventsDataset(Dataset):
                 p = np.zeros((0,), dtype=np.int64)
                 t = np.zeros((0,), dtype=np.int64)
             else:
-                start_idx, end_idx = self._resolve_slice_range(
-                    record=record,
-                    h5f=h5f,
-                    events_group=events,
-                    total_events=total_events,
-                )
+                accepted = False
+                x = np.zeros((0,), dtype=np.int64)
+                y = np.zeros((0,), dtype=np.int64)
+                p = np.zeros((0,), dtype=np.int64)
+                t = np.zeros((0,), dtype=np.int64)
+                for _ in range(self.max_window_attempts):
+                    start_idx, end_idx = self._resolve_slice_range(
+                        record=record,
+                        h5f=h5f,
+                        events_group=events,
+                        total_events=total_events,
+                    )
 
-                x = np.asarray(events["x"][start_idx:end_idx], dtype=np.int64)
-                y = np.asarray(events["y"][start_idx:end_idx], dtype=np.int64)
-                p_raw = np.asarray(events["p"][start_idx:end_idx])
-                p = (p_raw > 0).astype(np.int64, copy=False)
-                t = np.asarray(events["t"][start_idx:end_idx], dtype=np.int64)
+                    x = np.asarray(events["x"][start_idx:end_idx], dtype=np.int64)
+                    y = np.asarray(events["y"][start_idx:end_idx], dtype=np.int64)
+                    p_raw = np.asarray(events["p"][start_idx:end_idx])
+                    p = (p_raw > 0).astype(np.int64, copy=False)
+                    t = np.asarray(events["t"][start_idx:end_idx], dtype=np.int64)
+                    if t_offset != 0:
+                        t = t + t_offset
 
-                if "t_offset" in h5f:
-                    t += int(np.asarray(h5f["t_offset"][()]).item())
+                    if t.size > 1 and np.any(t[1:] < t[:-1]):
+                        order = np.argsort(t, kind="stable")
+                        x = x[order]
+                        y = y[order]
+                        p = p[order]
+                        t = t[order]
 
-            sensor_h, sensor_w = self._resolve_sensor_size(
-                h5f=h5f,
-                events_group=events,
-                fallback_height=record.sensor_height,
-                fallback_width=record.sensor_width,
-            )
+                    if x.size > 0:
+                        mask = (
+                            (x >= 0)
+                            & (x < sensor_w)
+                            & (y >= 0)
+                            & (y < sensor_h)
+                        )
+                        x = x[mask]
+                        y = y[mask]
+                        p = p[mask]
+                        t = t[mask]
+
+                    if self._passes_activity_filter(record=record, x=x, t=t):
+                        accepted = True
+                        break
+
+                if not accepted:
+                    x = np.zeros((0,), dtype=np.int64)
+                    y = np.zeros((0,), dtype=np.int64)
+                    p = np.zeros((0,), dtype=np.int64)
+                    t = np.zeros((0,), dtype=np.int64)
 
         if t.size > 1 and np.any(t[1:] < t[:-1]):
             order = np.argsort(t, kind="stable")
@@ -858,6 +938,10 @@ class PretrainMixedVoxelBatchProvider:
         window_duration_us_max: int | None = None,
         duration_sources: Sequence[str] | None = None,
         prefer_ms_to_idx: bool = True,
+        min_events_in_window: int = 1,
+        min_event_rate_eps: float | None = None,
+        activity_filter_sources: Sequence[str] | None = None,
+        max_window_attempts: int = 4,
         use_source_balancing: bool = True,
         epoch_size: int | None = None,
         sampler_seed: int = 42,
@@ -884,6 +968,10 @@ class PretrainMixedVoxelBatchProvider:
             window_duration_us_max=window_duration_us_max,
             duration_sources=duration_sources,
             prefer_ms_to_idx=prefer_ms_to_idx,
+            min_events_in_window=min_events_in_window,
+            min_event_rate_eps=min_event_rate_eps,
+            activity_filter_sources=activity_filter_sources,
+            max_window_attempts=max_window_attempts,
         )
         self._dataset_size = len(self.dataset)
         self._epoch_size = int(epoch_size) if epoch_size is not None else self._dataset_size

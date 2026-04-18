@@ -215,6 +215,12 @@ def _build_dataset_and_collator(cfg: DictConfig) -> tuple[PretrainMixedEventsDat
         window_duration_us_max=window_duration_us_max,
         duration_sources=duration_sources,
         prefer_ms_to_idx=prefer_ms_to_idx,
+        min_events_in_window=int(mixed_cfg.get("min_events_in_window", 1)),
+        min_event_rate_eps=mixed_cfg.get("min_event_rate_eps", None),
+        activity_filter_sources=tuple(
+            str(s) for s in mixed_cfg.get("activity_filter_sources", ["gen4"])
+        ),
+        max_window_attempts=int(mixed_cfg.get("max_window_attempts", 4)),
         drop_empty=True,
     )
 

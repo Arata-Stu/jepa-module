@@ -106,6 +106,13 @@ data:
     window_duration_us_max: 100000 # 100ms
     duration_sources: [dsec, gen4]
     prefer_ms_to_idx: true
+    # Low-activity window filtering (useful for stopped scenes, e.g. Gen4 traffic-light stop).
+    # If a sampled window does not satisfy conditions, the loader resamples another window
+    # from the same file up to max_window_attempts.
+    min_events_in_window: 1
+    min_event_rate_eps: null
+    activity_filter_sources: [gen4]
+    max_window_attempts: 4
 
     random_slice: true
     time_normalize: true

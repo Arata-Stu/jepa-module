@@ -494,6 +494,12 @@ def build_batch_provider(
         window_duration_us_max = mixed_cfg.get("window_duration_us_max", None)
         duration_sources = tuple(str(s) for s in mixed_cfg.get("duration_sources", ["dsec", "gen4"]))
         prefer_ms_to_idx = bool(mixed_cfg.get("prefer_ms_to_idx", True))
+        min_events_in_window = int(mixed_cfg.get("min_events_in_window", 1))
+        min_event_rate_eps = mixed_cfg.get("min_event_rate_eps", None)
+        activity_filter_sources = tuple(
+            str(s) for s in mixed_cfg.get("activity_filter_sources", ["gen4"])
+        )
+        max_window_attempts = int(mixed_cfg.get("max_window_attempts", 4))
         debug_index_check = bool(mixed_cfg.get("debug_index_check", False))
         debug_raise_on_oob = bool(mixed_cfg.get("debug_raise_on_oob", False))
         debug_log_limit = int(mixed_cfg.get("debug_log_limit", 20))
@@ -517,6 +523,10 @@ def build_batch_provider(
             window_duration_us_max=window_duration_us_max,
             duration_sources=duration_sources,
             prefer_ms_to_idx=prefer_ms_to_idx,
+            min_events_in_window=min_events_in_window,
+            min_event_rate_eps=min_event_rate_eps,
+            activity_filter_sources=activity_filter_sources,
+            max_window_attempts=max_window_attempts,
             use_source_balancing=bool(mixed_cfg.use_source_balancing),
             epoch_size=mixed_cfg.epoch_size,
             sampler_seed=int(mixed_cfg.sampler_seed),
@@ -1001,6 +1011,13 @@ def maybe_validate_cfg(cfg: DictConfig) -> None:
                     "data.pretrain_mixed.window_duration_us_max must be >= "
                     "window_duration_us_min"
                 )
+        if int(mixed_cfg.get("min_events_in_window", 1)) < 1:
+            raise ValueError("data.pretrain_mixed.min_events_in_window must be >= 1")
+        min_event_rate_eps = mixed_cfg.get("min_event_rate_eps", None)
+        if min_event_rate_eps is not None and float(min_event_rate_eps) <= 0.0:
+            raise ValueError("data.pretrain_mixed.min_event_rate_eps must be > 0 when set")
+        if int(mixed_cfg.get("max_window_attempts", 4)) < 1:
+            raise ValueError("data.pretrain_mixed.max_window_attempts must be >= 1")
         if int(mixed_cfg.canvas_height) < 1 or int(mixed_cfg.canvas_width) < 1:
             raise ValueError("data.pretrain_mixed.canvas_height/width must be >= 1")
         if mixed_cfg.epoch_size is not None and int(mixed_cfg.epoch_size) < 1:
@@ -1015,6 +1032,17 @@ def maybe_validate_cfg(cfg: DictConfig) -> None:
         if len(unknown_duration_sources) > 0:
             raise ValueError(
                 "data.pretrain_mixed.duration_sources must be a subset of "
+                "{dsec, gen4, n_imagenet}"
+            )
+        activity_filter_sources = [
+            str(s) for s in mixed_cfg.get("activity_filter_sources", ["gen4"])
+        ]
+        unknown_activity_filter_sources = [
+            s for s in activity_filter_sources if s not in allowed_source_names
+        ]
+        if len(unknown_activity_filter_sources) > 0:
+            raise ValueError(
+                "data.pretrain_mixed.activity_filter_sources must be a subset of "
                 "{dsec, gen4, n_imagenet}"
             )
 

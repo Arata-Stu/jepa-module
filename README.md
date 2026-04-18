@@ -132,6 +132,8 @@ python scripts/train_step1_pretrain.py \
 - `*.manifest_file` を設定すると、ディレクトリ再帰走査をスキップして list ファイルから読み込みます（`.txt` / `.csv` / `.npy`）。
 - `window_duration_us_*` はシーケンス系（例: DSEC/Gen4）の時間窓可変サンプリング用です。
 - `events_per_sample_*` はイベント数ベースの可変切り出しです。
+- 停止シーン対策には `min_events_in_window` と `min_event_rate_eps`（events/sec）を使えます。
+  条件を満たさない窓は同一ファイル内で `max_window_attempts` 回まで再サンプリングします。
 - `t_bins=10 + temporal_mix.short_t=1` で 10bin/1bin を学習中に混在できます。
 - H5読み込み失敗時は別サンプルへ自動リトライし、worker が落ちにくい挙動にしています。
 - 範囲外 index の追跡は `data.pretrain_mixed.debug_index_check=true` で有効化できます。
