@@ -11,6 +11,24 @@ from torch.utils.data import Dataset
 
 from event.representations import VoxelGrid, norm_voxel_grid
 
+try:
+    import hdf5plugin  # noqa: F401
+    _HAS_HDF5PLUGIN = True
+except ModuleNotFoundError:  # pragma: no cover - depends on runtime environment.
+    _HAS_HDF5PLUGIN = False
+
+
+def _open_h5_for_read(path: Path):
+    try:
+        return h5py.File(str(path), "r")
+    except OSError as exc:
+        if not _HAS_HDF5PLUGIN:
+            raise ModuleNotFoundError(
+                "Failed to open H5 file. This dataset may use Blosc-compressed HDF5; "
+                "install hdf5plugin (`pip install hdf5plugin`)."
+            ) from exc
+        raise
+
 
 def _load_n_imagenet_npz(
     event_path: Path,
@@ -54,7 +72,7 @@ def _load_n_imagenet_npz(
 def _load_n_imagenet_h5(
     event_path: Path,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
-    with h5py.File(str(event_path), "r") as h5f:
+    with _open_h5_for_read(event_path) as h5f:
         if "events" in h5f:
             events = h5f["events"]
             x = np.asarray(events["x"])

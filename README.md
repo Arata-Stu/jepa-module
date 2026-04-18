@@ -45,7 +45,7 @@ pip install -r requirements.txt
 
 ## Step1 実行例
 
-### synthetic（デフォルト）
+### synthetic（動作確認用）
 
 ```bash
 source env/bin/activate
@@ -54,9 +54,18 @@ python scripts/train_step1_pretrain.py \
   model_size=tiny \
   steps=200 \
   batch_size=8 \
-  height=128 width=128 \
-  t_bins=8 patch_size=16 tubelet_size=2 \
+  height=240 width=320 \
+  t_bins=10 patch_size=16 tubelet_size=2 \
+  temporal_mix.enabled=true \
+  temporal_mix.short_t=1 \
   normalize_voxel=true normalize_targets=true
+```
+
+### Pretrain Mixed（デフォルト設定そのまま）
+
+```bash
+source env/bin/activate
+python scripts/train_step1_pretrain.py
 ```
 
 ### N-ImageNet
@@ -161,11 +170,12 @@ torchrun --standalone --nproc_per_node=2 scripts/train_step1_pretrain.py \
 
 ## 補足
 
-- 学習データは `data.source` で切り替えます（`synthetic` / `n_imagenet` / `dsec`）。
+- 学習データは `data.source` で切り替えます（`pretrain_mixed` / `synthetic` / `n_imagenet` / `dsec`）。
 - `n_imagenet` では list file（1行1サンプルの npz パス）を読み込みます。
 - `dsec` は DSEC-Detection 構造（`images/events/object_detections`）を読み込みます。
 - `dsec` では `data.dsec.load_events/load_rgb/load_labels` でロード対象を切り替えできます。
 - `pretrain_mixed` は downsample 後 H5 を混合する「事前学習専用」ローダです（`eval.enabled=false`）。
+- 学習の入力解像度は `320x240` 前提です。`320x180`（Gen4）はローダ内で中央パディングして統一します。
 - 学習出力は timestamp ごとに `outputs/train/YYYY-MM-DD/HH-MM-SS/` 配下へまとまります。
 - 例:
   - checkpoint: `outputs/train/.../.../checkpoints/step_000100.pt`

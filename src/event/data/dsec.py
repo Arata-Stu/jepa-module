@@ -18,6 +18,28 @@ try:
 except ModuleNotFoundError:  # pragma: no cover - depends on runtime environment.
     h5py = None  # type: ignore[assignment]
 
+try:
+    import hdf5plugin  # noqa: F401
+    _HAS_HDF5PLUGIN = True
+except ModuleNotFoundError:  # pragma: no cover - depends on runtime environment.
+    _HAS_HDF5PLUGIN = False
+
+
+def _open_h5_for_read(path: Path):
+    if h5py is None:
+        raise ModuleNotFoundError(
+            "h5py is required to load DSEC events. Please install h5py."
+        )
+    try:
+        return h5py.File(str(path), "r")
+    except OSError as exc:
+        if not _HAS_HDF5PLUGIN:
+            raise ModuleNotFoundError(
+                "Failed to open H5 file. This dataset may use Blosc-compressed HDF5; "
+                "install hdf5plugin (`pip install hdf5plugin`)."
+            ) from exc
+        raise
+
 
 def _load_split_config(path: str | Path | None) -> dict[str, list[str]] | None:
     if path is None:
@@ -71,12 +93,7 @@ def _extract_events_by_time_window(
     t_min_us: int,
     t_max_us: int,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
-    if h5py is None:
-        raise ModuleNotFoundError(
-            "h5py is required to load DSEC events. Please install h5py."
-        )
-
-    with h5py.File(str(event_file), "r") as h5f:
+    with _open_h5_for_read(event_file) as h5f:
         ms_to_idx = np.asarray(h5f["ms_to_idx"], dtype=np.int64)
         t_offset = int(h5f["t_offset"][()])
 

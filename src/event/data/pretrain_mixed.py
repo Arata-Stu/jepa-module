@@ -14,6 +14,24 @@ from torch.utils.data import DataLoader, Dataset, Sampler, WeightedRandomSampler
 
 from event.representations import VoxelGrid, norm_voxel_grid
 
+try:
+    import hdf5plugin  # noqa: F401
+    _HAS_HDF5PLUGIN = True
+except ModuleNotFoundError:  # pragma: no cover - depends on runtime environment.
+    _HAS_HDF5PLUGIN = False
+
+
+def _open_h5_for_read(path: Path):
+    try:
+        return h5py.File(str(path), "r")
+    except OSError as exc:
+        if not _HAS_HDF5PLUGIN:
+            raise ModuleNotFoundError(
+                "Failed to open H5 file. This dataset may use Blosc-compressed HDF5; "
+                "install hdf5plugin (`pip install hdf5plugin`)."
+            ) from exc
+        raise
+
 
 @dataclass(frozen=True)
 class PretrainMixedSourceConfig:
@@ -290,7 +308,7 @@ class PretrainMixedEventsDataset(Dataset):
         return self._sample_range_by_event_count(total_events=total_events)
 
     def _read_event_window(self, record: _EventFileRecord) -> dict[str, Any]:
-        with h5py.File(str(record.path), "r") as h5f:
+        with _open_h5_for_read(record.path) as h5f:
             events = h5f["events"] if "events" in h5f else h5f
             total_events = int(events["t"].shape[0])
 
