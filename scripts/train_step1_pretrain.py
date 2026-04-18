@@ -264,11 +264,42 @@ def _prepare_temporal_inputs(
     return inputs[:, :, start : start + short_t, :, :], short_t
 
 
+def _data_loader_prefetch_factor(cfg: DictConfig) -> int | None:
+    value = cfg.data.get("prefetch_factor", None)
+    if value is None:
+        return None
+    return int(value)
+
+
+def _data_loader_persistent_workers(cfg: DictConfig) -> bool:
+    return bool(cfg.data.get("persistent_workers", False))
+
+
+def _configure_data_loader_runtime(cfg: DictConfig) -> None:
+    sharing_strategy_raw = cfg.data.get("sharing_strategy", None)
+    if sharing_strategy_raw is None:
+        return
+
+    sharing_strategy = str(sharing_strategy_raw).strip().lower()
+    if sharing_strategy in {"", "none", "null"}:
+        return
+
+    current = torch.multiprocessing.get_sharing_strategy()
+    if current == sharing_strategy:
+        return
+
+    torch.multiprocessing.set_sharing_strategy(sharing_strategy)
+    print(f"[dataloader] torch.multiprocessing sharing_strategy={sharing_strategy}")
+
+
 def build_batch_provider(
     cfg: DictConfig,
     voxel_builder: VoxelGrid,
     dist_state: DistributedState,
 ):
+    prefetch_factor = _data_loader_prefetch_factor(cfg)
+    persistent_workers = _data_loader_persistent_workers(cfg)
+
     source = str(cfg.data.source)
     if source == "synthetic":
         return SyntheticVoxelBatchProvider(
@@ -304,6 +335,8 @@ def build_batch_provider(
             num_workers=int(cfg.data.num_workers),
             pin_memory=bool(cfg.data.pin_memory),
             drop_last=bool(cfg.data.drop_last),
+            prefetch_factor=prefetch_factor,
+            persistent_workers=persistent_workers,
             root_dir=root_dir_abs,
             compressed=bool(cfg.data.n_imagenet.compressed),
             time_scale=float(cfg.data.n_imagenet.time_scale),
@@ -352,6 +385,8 @@ def build_batch_provider(
             num_workers=int(cfg.data.num_workers),
             pin_memory=bool(cfg.data.pin_memory),
             drop_last=bool(cfg.data.drop_last),
+            prefetch_factor=prefetch_factor,
+            persistent_workers=persistent_workers,
             split_config=split_config_abs,
             sync=str(cfg.data.dsec.sync),
             image_view=str(cfg.data.dsec.image_view),
@@ -403,8 +438,22 @@ def build_batch_provider(
 
             file_name = source_cfg.get("file_name", None)
             file_suffix = source_cfg.get("file_suffix", ".h5")
+            manifest_file = source_cfg.get("manifest_file", None)
             file_name = None if file_name is None else str(file_name).strip() or None
             file_suffix = None if file_suffix is None else str(file_suffix).strip() or None
+            manifest_file_path = None
+            if manifest_file is not None:
+                manifest_file_text = str(manifest_file).strip()
+                if len(manifest_file_text) > 0:
+                    candidate_under_root = Path(root_dir_abs) / manifest_file_text
+                    if candidate_under_root.exists():
+                        manifest_file_path = candidate_under_root.resolve()
+                    else:
+                        manifest_file_path = Path(to_absolute_path(manifest_file_text)).resolve()
+                    ensure_path_exists(
+                        str(manifest_file_path),
+                        f"pretrain_mixed.{source_name}.manifest_file",
+                    )
 
             splits = tuple(str(s) for s in source_cfg.splits)
             if len(splits) == 0:
@@ -423,6 +472,7 @@ def build_batch_provider(
                     recursive=bool(source_cfg.recursive),
                     file_name=file_name,
                     file_suffix=file_suffix,
+                    manifest_file=manifest_file_path,
                 )
             )
             active_source_weights[source_name] = float(source_weight)
@@ -454,6 +504,8 @@ def build_batch_provider(
             num_workers=int(cfg.data.num_workers),
             pin_memory=bool(cfg.data.pin_memory),
             drop_last=bool(cfg.data.drop_last),
+            prefetch_factor=prefetch_factor,
+            persistent_workers=persistent_workers,
             events_per_sample_min=events_per_sample_min,
             events_per_sample_max=events_per_sample_max,
             random_slice=bool(mixed_cfg.random_slice),
@@ -484,6 +536,9 @@ def build_eval_batch_provider(
 ):
     if not bool(cfg.eval.enabled):
         return None
+
+    prefetch_factor = _data_loader_prefetch_factor(cfg)
+    persistent_workers = _data_loader_persistent_workers(cfg)
 
     source = str(cfg.data.source)
     if source == "synthetic":
@@ -520,6 +575,8 @@ def build_eval_batch_provider(
             num_workers=int(cfg.data.num_workers),
             pin_memory=bool(cfg.data.pin_memory),
             drop_last=False,
+            prefetch_factor=prefetch_factor,
+            persistent_workers=persistent_workers,
             root_dir=root_dir_abs,
             compressed=bool(cfg.data.n_imagenet.compressed),
             time_scale=float(cfg.data.n_imagenet.time_scale),
@@ -568,6 +625,8 @@ def build_eval_batch_provider(
             num_workers=int(cfg.data.num_workers),
             pin_memory=bool(cfg.data.pin_memory),
             drop_last=False,
+            prefetch_factor=prefetch_factor,
+            persistent_workers=persistent_workers,
             split_config=split_config_abs,
             sync=str(cfg.data.dsec.sync),
             image_view=str(cfg.data.dsec.image_view),
@@ -840,6 +899,21 @@ def maybe_validate_cfg(cfg: DictConfig) -> None:
         raise ValueError("sigreg-proj must be >= 1")
     if int(cfg.batch_size) < 1:
         raise ValueError("batch_size must be >= 1")
+    if int(cfg.data.num_workers) < 0:
+        raise ValueError("data.num_workers must be >= 0")
+
+    prefetch_factor = cfg.data.get("prefetch_factor", None)
+    if prefetch_factor is not None and int(prefetch_factor) < 1:
+        raise ValueError("data.prefetch_factor must be >= 1 when set")
+
+    sharing_strategy_raw = cfg.data.get("sharing_strategy", None)
+    if sharing_strategy_raw is not None:
+        sharing_strategy = str(sharing_strategy_raw).strip().lower()
+        if sharing_strategy not in {"", "none", "null", "file_descriptor", "file_system"}:
+            raise ValueError(
+                "data.sharing_strategy must be one of "
+                "{file_descriptor, file_system, null}"
+            )
 
     if str(cfg.data.source) == "synthetic":
         if int(cfg.data.synthetic.num_events_min) < 1:
@@ -854,8 +928,6 @@ def maybe_validate_cfg(cfg: DictConfig) -> None:
             raise ValueError("data.n_imagenet.split must be train|val|test")
         if int(cfg.data.n_imagenet.sensor_height) < 1 or int(cfg.data.n_imagenet.sensor_width) < 1:
             raise ValueError("data.n_imagenet.sensor_height/width must be >= 1")
-        if int(cfg.data.num_workers) < 0:
-            raise ValueError("data.num_workers must be >= 0")
         if str(cfg.data.n_imagenet.slice.mode) not in {"idx", "time", "random"}:
             raise ValueError("data.n_imagenet.slice.mode must be idx|time|random")
         if int(cfg.data.n_imagenet.slice.length) < 1:
@@ -874,8 +946,6 @@ def maybe_validate_cfg(cfg: DictConfig) -> None:
             raise ValueError("data.dsec.image_view must be distorted|rectified")
         if int(cfg.data.dsec.sensor_height) < 1 or int(cfg.data.dsec.sensor_width) < 1:
             raise ValueError("data.dsec.sensor_height/width must be >= 1")
-        if int(cfg.data.num_workers) < 0:
-            raise ValueError("data.num_workers must be >= 0")
         if not bool(cfg.data.dsec.root_dir):
             raise ValueError("data.dsec.root_dir must be set for data.source=dsec")
         if not (
@@ -896,8 +966,6 @@ def maybe_validate_cfg(cfg: DictConfig) -> None:
 
     if str(cfg.data.source) == "pretrain_mixed":
         mixed_cfg = cfg.data.pretrain_mixed
-        if int(cfg.data.num_workers) < 0:
-            raise ValueError("data.num_workers must be >= 0")
         events_per_sample_default = int(
             mixed_cfg.get("events_per_sample", mixed_cfg.get("events_per_sample_min", 30000))
         )
@@ -974,6 +1042,7 @@ def maybe_validate_cfg(cfg: DictConfig) -> None:
 
             file_name = source_cfg.get("file_name", None)
             file_suffix = source_cfg.get("file_suffix", None)
+            manifest_file = source_cfg.get("manifest_file", None)
             if file_name is not None and len(str(file_name).strip()) == 0:
                 raise ValueError(
                     f"data.pretrain_mixed.{source_name}.file_name must be non-empty when set"
@@ -981,6 +1050,10 @@ def maybe_validate_cfg(cfg: DictConfig) -> None:
             if file_suffix is not None and len(str(file_suffix).strip()) == 0:
                 raise ValueError(
                     f"data.pretrain_mixed.{source_name}.file_suffix must be non-empty when set"
+                )
+            if manifest_file is not None and len(str(manifest_file).strip()) == 0:
+                raise ValueError(
+                    f"data.pretrain_mixed.{source_name}.manifest_file must be non-empty when set"
                 )
 
         if len(active_sources) == 0:
@@ -1058,6 +1131,7 @@ def _update_ema(
 @hydra.main(version_base="1.3", config_path="../configs", config_name="train_step1")
 def main(cfg: DictConfig) -> None:
     maybe_validate_cfg(cfg)
+    _configure_data_loader_runtime(cfg)
     collapse_strategy = get_collapse_strategy(cfg)
     dist_state = init_distributed(
         enabled=bool(cfg.distributed.enabled),

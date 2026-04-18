@@ -43,6 +43,7 @@ class PretrainMixedSourceConfig:
     recursive: bool = True
     file_name: str | None = None
     file_suffix: str | None = ".h5"
+    manifest_file: Path | None = None
 
 
 @dataclass(frozen=True)
@@ -59,7 +60,67 @@ def _discover_h5_files(
     recursive: bool,
     file_name: str | None,
     file_suffix: str | None,
+    manifest_file: Path | None = None,
 ) -> list[Path]:
+    if manifest_file is not None:
+        files: list[Path] = []
+        missing_count = 0
+        split_dirs = [(root_dir / split).resolve() for split in splits]
+
+        entries: list[str] = []
+        if manifest_file.suffix.lower() == ".npy":
+            loaded = np.load(str(manifest_file), allow_pickle=True)
+            if isinstance(loaded, np.ndarray):
+                loaded_obj = loaded.tolist()
+                if isinstance(loaded_obj, (list, tuple)):
+                    entries = [str(v) for v in loaded_obj]
+                else:
+                    entries = [str(loaded_obj)]
+            else:
+                entries = [str(loaded)]
+        else:
+            with manifest_file.open("r", encoding="utf-8") as f:
+                for line in f:
+                    item = line.strip()
+                    if len(item) == 0 or item.startswith("#"):
+                        continue
+                    if "," in item:
+                        item = item.split(",", 1)[0].strip()
+                    elif "\t" in item:
+                        item = item.split("\t", 1)[0].strip()
+                    elif (" " in item) and (not item.lower().endswith((".h5", ".hdf5"))):
+                        first = item.split(" ", 1)[0].strip()
+                        if first.lower().endswith((".h5", ".hdf5")):
+                            item = first
+                    if len(item) == 0:
+                        continue
+                    entries.append(item)
+
+        for item in entries:
+            p = Path(item).expanduser()
+            if not p.is_absolute():
+                p = (root_dir / p).resolve()
+            if not p.is_file():
+                missing_count += 1
+                continue
+
+            p_resolved = p.resolve()
+            if len(split_dirs) > 0 and not any(sd == p_resolved or sd in p_resolved.parents for sd in split_dirs):
+                continue
+            if file_name is not None and p.name != file_name:
+                continue
+            if file_suffix is not None and not p.name.endswith(file_suffix):
+                continue
+            files.append(p_resolved)
+
+        files = sorted(set(files))
+        if missing_count > 0:
+            print(
+                f"[pretrain_mixed][WARN] manifest={manifest_file} "
+                f"missing_entries={missing_count}"
+            )
+        return files
+
     files: list[Path] = []
     for split in splits:
         split_dir = root_dir / split
@@ -109,6 +170,9 @@ class PretrainMixedEventsDataset(Dataset):
         )
         self.duration_sources = set(duration_sources or [])
         self.prefer_ms_to_idx = bool(prefer_ms_to_idx)
+        self._max_read_retry = 8
+        self._warn_budget = 20
+        self._warned_read_errors = 0
 
         if self.events_per_sample_min < 1:
             raise ValueError("events_per_sample_min must be >= 1")
@@ -141,8 +205,13 @@ class PretrainMixedEventsDataset(Dataset):
                 recursive=cfg.recursive,
                 file_name=cfg.file_name,
                 file_suffix=cfg.file_suffix,
+                manifest_file=cfg.manifest_file,
             )
-            print(f"[pretrain_mixed] source={cfg.name} files={len(files)} root={cfg.root_dir}")
+            mode = "manifest" if cfg.manifest_file is not None else "scan"
+            print(
+                f"[pretrain_mixed] source={cfg.name} files={len(files)} "
+                f"root={cfg.root_dir} mode={mode}"
+            )
             for p in files:
                 records.append(
                     _EventFileRecord(
@@ -377,17 +446,62 @@ class PretrainMixedEventsDataset(Dataset):
     def __len__(self) -> int:
         return len(self.records)
 
-    def __getitem__(self, idx: int) -> dict[str, Any]:
-        record = self.records[int(idx)]
-        sample = self._read_event_window(record=record)
+    @staticmethod
+    def _sample_alternative_index(total: int, exclude_idx: int) -> int:
+        if total <= 1:
+            return int(exclude_idx)
+        r = random.randint(0, total - 2)
+        return r + 1 if r >= exclude_idx else r
 
-        if self.drop_empty and sample["x"].numel() == 0 and len(self.records) > 1:
-            for _ in range(3):
-                alt_idx = random.randint(0, len(self.records) - 1)
-                sample = self._read_event_window(record=self.records[alt_idx])
-                if sample["x"].numel() > 0:
-                    break
-        return sample
+    @staticmethod
+    def _build_empty_sample(record: _EventFileRecord) -> dict[str, Any]:
+        empty = torch.empty((0,), dtype=torch.int64)
+        return {
+            "x": empty,
+            "y": empty,
+            "pol": empty,
+            "time": empty,
+            "path": str(record.path),
+            "source": str(record.source),
+            "sensor_height": int(record.sensor_height),
+            "sensor_width": int(record.sensor_width),
+        }
+
+    def _warn_read_error(self, record: _EventFileRecord, exc: Exception) -> None:
+        if self._warned_read_errors >= self._warn_budget:
+            return
+        print(
+            f"[pretrain_mixed][WARN] failed to read source={record.source} "
+            f"path={record.path}: {type(exc).__name__}: {exc}"
+        )
+        self._warned_read_errors += 1
+
+    def __getitem__(self, idx: int) -> dict[str, Any]:
+        if len(self.records) == 0:
+            raise RuntimeError("PretrainMixedEventsDataset has no records")
+
+        total = len(self.records)
+        current_idx = int(idx) % total
+        max_attempts = 1 if total <= 1 else min(self._max_read_retry, total)
+        last_sample: dict[str, Any] | None = None
+        last_record = self.records[current_idx]
+
+        for _ in range(max_attempts):
+            record = self.records[current_idx]
+            last_record = record
+            try:
+                sample = self._read_event_window(record=record)
+                last_sample = sample
+                if (not self.drop_empty) or sample["x"].numel() > 0 or total <= 1:
+                    return sample
+            except Exception as exc:
+                self._warn_read_error(record=record, exc=exc)
+
+            current_idx = self._sample_alternative_index(total=total, exclude_idx=current_idx)
+
+        if last_sample is not None:
+            return last_sample
+        return self._build_empty_sample(record=last_record)
 
 
 class _DistributedWeightedSampler(Sampler[int]):
@@ -586,6 +700,8 @@ class PretrainMixedVoxelBatchProvider:
         num_workers: int,
         pin_memory: bool,
         drop_last: bool,
+        prefetch_factor: int | None = None,
+        persistent_workers: bool = False,
         events_per_sample_min: int = 30_000,
         events_per_sample_max: int = 30_000,
         random_slice: bool = True,
@@ -660,6 +776,12 @@ class PretrainMixedVoxelBatchProvider:
                 replacement=True,
             )
 
+        loader_kwargs: dict[str, Any] = {}
+        if int(num_workers) > 0:
+            loader_kwargs["persistent_workers"] = bool(persistent_workers)
+            if prefetch_factor is not None:
+                loader_kwargs["prefetch_factor"] = int(prefetch_factor)
+
         self.loader = DataLoader(
             self.dataset,
             batch_size=batch_size,
@@ -669,6 +791,7 @@ class PretrainMixedVoxelBatchProvider:
             drop_last=drop_last,
             collate_fn=collator,
             sampler=self.sampler,
+            **loader_kwargs,
         )
         self._sampler_epoch = 0
         if self.sampler is not None and hasattr(self.sampler, "set_epoch"):

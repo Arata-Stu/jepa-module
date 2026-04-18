@@ -87,6 +87,8 @@ class NImageNetVoxelBatchProvider:
         augment_enabled: bool,
         hflip_prob: float,
         max_shift: int,
+        prefetch_factor: int | None = None,
+        persistent_workers: bool = False,
         distributed: bool = False,
         rank: int = 0,
         world_size: int = 1,
@@ -130,6 +132,12 @@ class NImageNetVoxelBatchProvider:
                 drop_last=drop_last,
             )
 
+        loader_kwargs: dict[str, Any] = {}
+        if int(num_workers) > 0:
+            loader_kwargs["persistent_workers"] = bool(persistent_workers)
+            if prefetch_factor is not None:
+                loader_kwargs["prefetch_factor"] = int(prefetch_factor)
+
         self.loader = DataLoader(
             self.dataset,
             batch_size=batch_size,
@@ -139,6 +147,7 @@ class NImageNetVoxelBatchProvider:
             drop_last=drop_last,
             collate_fn=collator,
             sampler=self.sampler,
+            **loader_kwargs,
         )
         self._sampler_epoch = 0
         if self.sampler is not None:
@@ -184,6 +193,8 @@ class DSECVoxelBatchProvider:
         rescale_to_voxel_grid: bool,
         downsample: bool = False,
         downsample_event_file: str = "events_2x.h5",
+        prefetch_factor: int | None = None,
+        persistent_workers: bool = False,
         distributed: bool = False,
         rank: int = 0,
         world_size: int = 1,
@@ -228,6 +239,12 @@ class DSECVoxelBatchProvider:
                 drop_last=drop_last,
             )
 
+        loader_kwargs: dict[str, Any] = {}
+        if int(num_workers) > 0:
+            loader_kwargs["persistent_workers"] = bool(persistent_workers)
+            if prefetch_factor is not None:
+                loader_kwargs["prefetch_factor"] = int(prefetch_factor)
+
         self.loader = DataLoader(
             self.dataset,
             batch_size=batch_size,
@@ -237,6 +254,7 @@ class DSECVoxelBatchProvider:
             drop_last=drop_last,
             collate_fn=collator,
             sampler=self.sampler,
+            **loader_kwargs,
         )
         self._sampler_epoch = 0
         if self.sampler is not None:

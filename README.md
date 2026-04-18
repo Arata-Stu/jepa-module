@@ -116,6 +116,7 @@ python scripts/train_step1_pretrain.py \
   data.pretrain_mixed.gen4.root_dir=/absolute/path/to/gen4-downsampled \
   data.pretrain_mixed.n_imagenet.enabled=true \
   data.pretrain_mixed.n_imagenet.root_dir=/absolute/path/to/n-imagenet-downsample \
+  data.pretrain_mixed.n_imagenet.manifest_file=/absolute/path/to/n_imagenet_train_manifest.txt \
   data.pretrain_mixed.events_per_sample_min=20000 \
   data.pretrain_mixed.events_per_sample_max=80000 \
   data.pretrain_mixed.window_duration_us_min=200000 \
@@ -128,9 +129,13 @@ python scripts/train_step1_pretrain.py \
 
 - `weights` でデータセット混合比率を制御できます。
 - `weight <= 0` の source は除外され、`root_dir` 未設定でもエラーになりません。
+- `*.manifest_file` を設定すると、ディレクトリ再帰走査をスキップして list ファイルから読み込みます（`.txt` / `.csv` / `.npy`）。
 - `window_duration_us_*` はシーケンス系（例: DSEC/Gen4）の時間窓可変サンプリング用です。
 - `events_per_sample_*` はイベント数ベースの可変切り出しです。
 - `t_bins=10 + temporal_mix.short_t=1` で 10bin/1bin を学習中に混在できます。
+- H5読み込み失敗時は別サンプルへ自動リトライし、worker が落ちにくい挙動にしています。
+- DataLoader 周りで `pin_memory` スレッドのエラーが出る場合は、まず
+  `data.num_workers=0 data.pin_memory=false` で安定動作を確認し、その後 `num_workers` を増やしてください。
 
 ## Collapse Strategy 切り替え
 
