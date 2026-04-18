@@ -2,7 +2,7 @@
 """
 Step1 prototype for event-based JEPA pretraining.
 
-- input: event voxel grids (`synthetic` or `n_imagenet`)
+- input: event voxel grids (`synthetic`, `n_imagenet`, `dsec`, `pretrain_mixed`)
 - task: masked token prediction at the same timestamp
 - models: JEPA ViT encoder + predictor in `src/jepa`
 - config: Hydra (`configs/train_step1.yaml`)
@@ -46,6 +46,8 @@ from event.representations import VoxelGrid  # noqa: E402
 from event.data import (  # noqa: E402
     DSECVoxelBatchProvider,
     NImageNetVoxelBatchProvider,
+    PretrainMixedSourceConfig,
+    PretrainMixedVoxelBatchProvider,
     SyntheticVoxelBatchProvider,
     ensure_path_exists,
     resolve_list_file,
@@ -74,7 +76,8 @@ MODEL_SPECS: Dict[str, Dict[str, object]] = {
 COLLAPSE_STRATEGY_CHOICES = {"ema_stopgrad", "vicreg", "sigreg"}
 PREDICTOR_DEPTH_CHOICES = {4, 8, 12, 20, 24, 40}
 RECON_LOSS_CHOICES = {"smooth_l1", "mse"}
-DATA_SOURCE_CHOICES = {"synthetic", "n_imagenet", "dsec"}
+DATA_SOURCE_CHOICES = {"synthetic", "n_imagenet", "dsec", "pretrain_mixed"}
+PRETRAIN_MIXED_SOURCE_NAMES = ("dsec", "gen4", "n_imagenet")
 
 def set_seed(seed: int) -> None:
     random.seed(seed)
@@ -366,6 +369,111 @@ def build_batch_provider(
             world_size=dist_state.world_size,
         )
 
+    if source == "pretrain_mixed":
+        mixed_cfg = cfg.data.pretrain_mixed
+        weights_cfg = mixed_cfg.get("weights", None)
+
+        def _source_weight(source_name: str) -> float:
+            if weights_cfg is None:
+                return 1.0
+            return float(weights_cfg.get(source_name, 1.0))
+
+        source_configs: list[PretrainMixedSourceConfig] = []
+        active_source_weights: dict[str, float] = {}
+        for source_name in ("dsec", "gen4", "n_imagenet"):
+            source_cfg = mixed_cfg[source_name]
+            if not bool(source_cfg.enabled):
+                continue
+
+            source_weight = _source_weight(source_name)
+            if source_weight <= 0.0:
+                print(
+                    f"[pretrain_mixed] skip source={source_name} because weight={source_weight} <= 0"
+                )
+                continue
+
+            root_dir = source_cfg.root_dir
+            if not root_dir:
+                raise ValueError(
+                    f"data.pretrain_mixed.{source_name}.root_dir must be set "
+                    "when this source is enabled"
+                )
+            root_dir_abs = to_absolute_path(str(root_dir))
+            ensure_path_exists(root_dir_abs, f"pretrain_mixed.{source_name}.root_dir")
+
+            file_name = source_cfg.get("file_name", None)
+            file_suffix = source_cfg.get("file_suffix", ".h5")
+            file_name = None if file_name is None else str(file_name).strip() or None
+            file_suffix = None if file_suffix is None else str(file_suffix).strip() or None
+
+            splits = tuple(str(s) for s in source_cfg.splits)
+            if len(splits) == 0:
+                raise ValueError(
+                    f"data.pretrain_mixed.{source_name}.splits must be non-empty "
+                    "when this source is enabled"
+                )
+
+            source_configs.append(
+                PretrainMixedSourceConfig(
+                    name=str(source_name),
+                    root_dir=Path(root_dir_abs),
+                    splits=splits,
+                    sensor_height=int(source_cfg.sensor_height),
+                    sensor_width=int(source_cfg.sensor_width),
+                    recursive=bool(source_cfg.recursive),
+                    file_name=file_name,
+                    file_suffix=file_suffix,
+                )
+            )
+            active_source_weights[source_name] = float(source_weight)
+
+        if len(source_configs) == 0:
+            raise ValueError(
+                "No active source in pretrain_mixed. "
+                "Enable at least one source and set its weight > 0."
+            )
+
+        source_weights = active_source_weights if len(active_source_weights) > 0 else None
+
+        events_per_sample_default = int(
+            mixed_cfg.get("events_per_sample", mixed_cfg.get("events_per_sample_min", 30000))
+        )
+        events_per_sample_min = int(mixed_cfg.get("events_per_sample_min", events_per_sample_default))
+        events_per_sample_max = int(mixed_cfg.get("events_per_sample_max", events_per_sample_default))
+        window_duration_us_min = mixed_cfg.get("window_duration_us_min", None)
+        window_duration_us_max = mixed_cfg.get("window_duration_us_max", None)
+        duration_sources = tuple(str(s) for s in mixed_cfg.get("duration_sources", ["dsec", "gen4"]))
+        prefer_ms_to_idx = bool(mixed_cfg.get("prefer_ms_to_idx", True))
+
+        return PretrainMixedVoxelBatchProvider(
+            source_configs=source_configs,
+            source_weights=source_weights,
+            voxel_builder=voxel_builder,
+            batch_size=int(cfg.batch_size),
+            normalize_voxel=bool(cfg.normalize_voxel),
+            num_workers=int(cfg.data.num_workers),
+            pin_memory=bool(cfg.data.pin_memory),
+            drop_last=bool(cfg.data.drop_last),
+            events_per_sample_min=events_per_sample_min,
+            events_per_sample_max=events_per_sample_max,
+            random_slice=bool(mixed_cfg.random_slice),
+            time_normalize=bool(mixed_cfg.time_normalize),
+            window_duration_us_min=window_duration_us_min,
+            window_duration_us_max=window_duration_us_max,
+            duration_sources=duration_sources,
+            prefer_ms_to_idx=prefer_ms_to_idx,
+            use_source_balancing=bool(mixed_cfg.use_source_balancing),
+            epoch_size=mixed_cfg.epoch_size,
+            sampler_seed=int(mixed_cfg.sampler_seed),
+            rescale_to_voxel_grid=bool(mixed_cfg.rescale_to_voxel_grid),
+            canvas_height=int(mixed_cfg.canvas_height),
+            canvas_width=int(mixed_cfg.canvas_width),
+            center_pad_to_canvas=bool(mixed_cfg.center_pad_to_canvas),
+            distributed=dist_state.enabled,
+            rank=dist_state.rank,
+            world_size=dist_state.world_size,
+        )
+
     raise ValueError(f"Unknown data.source: {source}")
 
 
@@ -477,6 +585,12 @@ def build_eval_batch_provider(
             world_size=dist_state.world_size,
         )
 
+    if source == "pretrain_mixed":
+        raise ValueError(
+            "data.source=pretrain_mixed is a pretraining-only loader. "
+            "Set eval.enabled=false for this source."
+        )
+
     raise ValueError(f"Unknown data.source for eval: {source}")
 
 
@@ -484,6 +598,43 @@ def _extract_scalar(x: Any) -> float:
     if isinstance(x, torch.Tensor):
         return float(x.detach().item())
     return float(x)
+
+
+def _compute_source_ratios(
+    batch: dict[str, Any],
+    dist_state: DistributedState,
+    device: torch.device,
+) -> dict[str, float] | None:
+    sources = batch.get("sources", None)
+    if not isinstance(sources, list) or len(sources) == 0:
+        return None
+
+    counts = torch.zeros((len(PRETRAIN_MIXED_SOURCE_NAMES),), dtype=torch.float32, device=device)
+    total = 0.0
+    for src in sources:
+        if not isinstance(src, str):
+            continue
+        if src in PRETRAIN_MIXED_SOURCE_NAMES:
+            idx = PRETRAIN_MIXED_SOURCE_NAMES.index(src)
+            counts[idx] += 1.0
+            total += 1.0
+
+    if total <= 0.0:
+        return None
+
+    total_tensor = torch.tensor([total], dtype=torch.float32, device=device)
+    if dist_state.enabled:
+        dist.all_reduce(counts, op=dist.ReduceOp.SUM)
+        dist.all_reduce(total_tensor, op=dist.ReduceOp.SUM)
+
+    denom = float(total_tensor.item())
+    if denom <= 0.0:
+        return None
+
+    return {
+        name: float(counts[i].item() / denom)
+        for i, name in enumerate(PRETRAIN_MIXED_SOURCE_NAMES)
+    }
 
 
 def forward_step(
@@ -743,7 +894,118 @@ def maybe_validate_cfg(cfg: DictConfig) -> None:
         if len(downsample_event_file.strip()) == 0:
             raise ValueError("data.dsec.downsample_event_file must be non-empty")
 
+    if str(cfg.data.source) == "pretrain_mixed":
+        mixed_cfg = cfg.data.pretrain_mixed
+        if int(cfg.data.num_workers) < 0:
+            raise ValueError("data.num_workers must be >= 0")
+        events_per_sample_default = int(
+            mixed_cfg.get("events_per_sample", mixed_cfg.get("events_per_sample_min", 30000))
+        )
+        if events_per_sample_default < 1:
+            raise ValueError("data.pretrain_mixed.events_per_sample (or *_min) must be >= 1")
+        events_per_sample_min = int(mixed_cfg.get("events_per_sample_min", events_per_sample_default))
+        events_per_sample_max = int(mixed_cfg.get("events_per_sample_max", events_per_sample_default))
+        if events_per_sample_min < 1:
+            raise ValueError("data.pretrain_mixed.events_per_sample_min must be >= 1")
+        if events_per_sample_max < events_per_sample_min:
+            raise ValueError(
+                "data.pretrain_mixed.events_per_sample_max must be >= events_per_sample_min"
+            )
+
+        window_duration_us_min = mixed_cfg.get("window_duration_us_min", None)
+        window_duration_us_max = mixed_cfg.get("window_duration_us_max", None)
+        if (window_duration_us_min is None) != (window_duration_us_max is None):
+            raise ValueError(
+                "data.pretrain_mixed.window_duration_us_min and "
+                "window_duration_us_max must be both set or both None"
+            )
+        if window_duration_us_min is not None:
+            if int(window_duration_us_min) < 1:
+                raise ValueError("data.pretrain_mixed.window_duration_us_min must be >= 1")
+            if int(window_duration_us_max) < int(window_duration_us_min):
+                raise ValueError(
+                    "data.pretrain_mixed.window_duration_us_max must be >= "
+                    "window_duration_us_min"
+                )
+        if int(mixed_cfg.canvas_height) < 1 or int(mixed_cfg.canvas_width) < 1:
+            raise ValueError("data.pretrain_mixed.canvas_height/width must be >= 1")
+        if mixed_cfg.epoch_size is not None and int(mixed_cfg.epoch_size) < 1:
+            raise ValueError("data.pretrain_mixed.epoch_size must be >= 1 when set")
+
+        active_sources: list[str] = []
+        allowed_source_names = {"dsec", "gen4", "n_imagenet"}
+        duration_sources = [str(s) for s in mixed_cfg.get("duration_sources", ["dsec", "gen4"])]
+        unknown_duration_sources = [s for s in duration_sources if s not in allowed_source_names]
+        if len(unknown_duration_sources) > 0:
+            raise ValueError(
+                "data.pretrain_mixed.duration_sources must be a subset of "
+                "{dsec, gen4, n_imagenet}"
+            )
+
+        weights_cfg = mixed_cfg.get("weights", None)
+
+        def _source_weight(source_name: str) -> float:
+            if weights_cfg is None:
+                return 1.0
+            return float(weights_cfg.get(source_name, 1.0))
+
+        for source_name in ("dsec", "gen4", "n_imagenet"):
+            source_cfg = mixed_cfg[source_name]
+            if not bool(source_cfg.enabled):
+                continue
+
+            source_weight = _source_weight(source_name)
+            if source_weight <= 0.0:
+                continue
+
+            active_sources.append(source_name)
+            if not bool(source_cfg.root_dir):
+                raise ValueError(
+                    f"data.pretrain_mixed.{source_name}.root_dir must be set when enabled"
+                )
+            if len(source_cfg.splits) == 0:
+                raise ValueError(
+                    f"data.pretrain_mixed.{source_name}.splits must be non-empty when enabled"
+                )
+            if int(source_cfg.sensor_height) < 1 or int(source_cfg.sensor_width) < 1:
+                raise ValueError(
+                    f"data.pretrain_mixed.{source_name}.sensor_height/width must be >= 1"
+                )
+
+            file_name = source_cfg.get("file_name", None)
+            file_suffix = source_cfg.get("file_suffix", None)
+            if file_name is not None and len(str(file_name).strip()) == 0:
+                raise ValueError(
+                    f"data.pretrain_mixed.{source_name}.file_name must be non-empty when set"
+                )
+            if file_suffix is not None and len(str(file_suffix).strip()) == 0:
+                raise ValueError(
+                    f"data.pretrain_mixed.{source_name}.file_suffix must be non-empty when set"
+                )
+
+        if len(active_sources) == 0:
+            raise ValueError(
+                "No active source in pretrain_mixed. "
+                "Enable at least one source and set its weight > 0."
+            )
+
+        if bool(mixed_cfg.use_source_balancing):
+            if weights_cfg is not None:
+                total_active_weight = 0.0
+                for source_name in active_sources:
+                    total_active_weight += max(0.0, float(weights_cfg.get(source_name, 0.0)))
+                if total_active_weight <= 0.0:
+                    raise ValueError(
+                        "data.pretrain_mixed.weights must include positive value(s) "
+                        "for enabled sources when use_source_balancing=true"
+                    )
+
     if bool(cfg.eval.enabled):
+        if str(cfg.data.source) == "pretrain_mixed":
+            raise ValueError(
+                "eval.enabled is not supported with data.source=pretrain_mixed "
+                "(pretraining-only loader)."
+            )
         if int(cfg.eval.every) < 1:
             raise ValueError("eval.every must be >= 1")
         if int(cfg.eval.steps) < 1:
@@ -969,6 +1231,13 @@ def main(cfg: DictConfig) -> None:
             optimizer.zero_grad(set_to_none=True)
             batch = batch_provider.next_batch()
             inputs = batch["inputs"].to(device, non_blocking=True)
+            source_ratios = None
+            if str(cfg.data.source) == "pretrain_mixed":
+                source_ratios = _compute_source_ratios(
+                    batch=batch,
+                    dist_state=dist_state,
+                    device=device,
+                )
             step_metrics = forward_step(
                 cfg=cfg,
                 step=step,
@@ -1055,8 +1324,23 @@ def main(cfg: DictConfig) -> None:
                     int(round(step_pred_tokens)),
                     step,
                 )
+                if source_ratios is not None:
+                    for source_name, ratio in source_ratios.items():
+                        tensorboard_writer.add_scalar(
+                            f"train/source_ratio_{source_name}",
+                            float(ratio),
+                            step,
+                        )
 
             if main_process and (step % int(cfg.print_every) == 0 or step == 1):
+                source_ratio_str = ""
+                if source_ratios is not None:
+                    source_ratio_str = " " + " ".join(
+                        [
+                            f"src_{name}={float(source_ratios.get(name, 0.0)):.3f}"
+                            for name in PRETRAIN_MIXED_SOURCE_NAMES
+                        ]
+                    )
                 print(
                     f"step={step:05d}/{int(cfg.steps):05d} "
                     f"loss={step_loss:.6f} "
@@ -1068,6 +1352,7 @@ def main(cfg: DictConfig) -> None:
                     f"wd={step_wd:.8f} "
                     f"context_tokens={int(round(step_context_tokens))} "
                     f"pred_tokens={int(round(step_pred_tokens))}"
+                    f"{source_ratio_str}"
                 )
 
             if eval_provider is not None and step % int(cfg.eval.every) == 0:

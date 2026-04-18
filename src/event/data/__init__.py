@@ -2,6 +2,12 @@
 
 from .dsec import DSECEventsDataset, DSECVoxelCollator
 from .n_imagenet import NImageNetEventsDataset, NImageNetVoxelCollator
+from .pretrain_mixed import (
+    PretrainMixedEventsDataset,
+    PretrainMixedSourceConfig,
+    PretrainMixedVoxelBatchProvider,
+    PretrainMixedVoxelCollator,
+)
 from .providers import (
     DSECVoxelBatchProvider,
     NImageNetVoxelBatchProvider,
@@ -17,6 +23,10 @@ __all__ = [
     "NImageNetEventsDataset",
     "NImageNetVoxelCollator",
     "NImageNetVoxelBatchProvider",
+    "PretrainMixedEventsDataset",
+    "PretrainMixedSourceConfig",
+    "PretrainMixedVoxelBatchProvider",
+    "PretrainMixedVoxelCollator",
     "SyntheticVoxelBatchProvider",
     "ensure_path_exists",
     "resolve_list_file",

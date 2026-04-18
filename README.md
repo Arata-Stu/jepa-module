@@ -89,6 +89,40 @@ python scripts/train_step1_pretrain.py \
   data.num_workers=4
 ```
 
+### Pretrain Mixed（DSEC + Gen4 + N-ImageNet, 自己教師あり）
+
+```bash
+source env/bin/activate
+python scripts/train_step1_pretrain.py \
+  data.source=pretrain_mixed \
+  eval.enabled=false \
+  t_bins=10 \
+  temporal_mix.enabled=true \
+  temporal_mix.short_t=1 \
+  temporal_mix.image_prob=0.5 \
+  temporal_mix.short_mode=sum \
+  data.pretrain_mixed.dsec.enabled=true \
+  data.pretrain_mixed.dsec.root_dir=/absolute/path/to/dsec-downsampled \
+  data.pretrain_mixed.gen4.enabled=true \
+  data.pretrain_mixed.gen4.root_dir=/absolute/path/to/gen4-downsampled \
+  data.pretrain_mixed.n_imagenet.enabled=true \
+  data.pretrain_mixed.n_imagenet.root_dir=/absolute/path/to/n-imagenet-downsample \
+  data.pretrain_mixed.events_per_sample_min=20000 \
+  data.pretrain_mixed.events_per_sample_max=80000 \
+  data.pretrain_mixed.window_duration_us_min=200000 \
+  data.pretrain_mixed.window_duration_us_max=1200000 \
+  data.pretrain_mixed.duration_sources=[dsec,gen4] \
+  data.pretrain_mixed.weights.dsec=1.0 \
+  data.pretrain_mixed.weights.gen4=1.0 \
+  data.pretrain_mixed.weights.n_imagenet=1.0
+```
+
+- `weights` でデータセット混合比率を制御できます。
+- `weight <= 0` の source は除外され、`root_dir` 未設定でもエラーになりません。
+- `window_duration_us_*` はシーケンス系（例: DSEC/Gen4）の時間窓可変サンプリング用です。
+- `events_per_sample_*` はイベント数ベースの可変切り出しです。
+- `t_bins=10 + temporal_mix.short_t=1` で 10bin/1bin を学習中に混在できます。
+
 ## Collapse Strategy 切り替え
 
 - `collapse_strategy=ema_stopgrad`: EMA teacher + stop-grad（デフォルト）
@@ -131,6 +165,7 @@ torchrun --standalone --nproc_per_node=2 scripts/train_step1_pretrain.py \
 - `n_imagenet` では list file（1行1サンプルの npz パス）を読み込みます。
 - `dsec` は DSEC-Detection 構造（`images/events/object_detections`）を読み込みます。
 - `dsec` では `data.dsec.load_events/load_rgb/load_labels` でロード対象を切り替えできます。
+- `pretrain_mixed` は downsample 後 H5 を混合する「事前学習専用」ローダです（`eval.enabled=false`）。
 - 学習出力は timestamp ごとに `outputs/train/YYYY-MM-DD/HH-MM-SS/` 配下へまとまります。
 - 例:
   - checkpoint: `outputs/train/.../.../checkpoints/step_000100.pt`
