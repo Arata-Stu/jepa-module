@@ -1,4 +1,4 @@
-# Hydra config for MAE pretraining (standalone; no config inheritance)
+# Hydra config for JEPA pretraining
 
 collapse_strategy: ema_stopgrad
 model_size: tiny
@@ -19,9 +19,9 @@ patch_size: 16
 tubelet_size: 2
 
 temporal_mix:
-  enabled: false
+  enabled: true
   short_t: 1
-  image_prob: 0.0
+  image_prob: 0.5
   short_mode: sum  # sum | first | center
 
 predictor_depth: 4
@@ -67,9 +67,9 @@ max_context_frames_ratio: 1.0
 
 print_every: 1000
 save_every: 10000
-out_dir: ${hydra:runtime.output_dir}/checkpoints_mae
-log_dir: ${hydra:runtime.output_dir}/logs_mae
-metrics_file: ${hydra:runtime.output_dir}/logs_mae/train_metrics.csv
+out_dir: ${hydra:runtime.output_dir}/checkpoints
+log_dir: ${hydra:runtime.output_dir}/logs
+metrics_file: ${hydra:runtime.output_dir}/logs/train_metrics.csv
 
 logging:
   tensorboard:
@@ -200,18 +200,6 @@ data:
       file_suffix: .h5
       sensor_height: 240
       sensor_width: 320
-
-mae:
-  mask_ratio: 0.75
-  recon_loss: mse            # mse | smooth_l1
-  loss_on_mask_only: true    # true: MAE style, false: all tokens
-  normalize_targets: false
-  encoder_use_rope: true
-  decoder_embed_dim: 384
-  decoder_depth: 4
-  decoder_heads: null        # null => model-size default
-  decoder_mlp_ratio: 4.0
-  decoder_use_silu: false
 
 hydra:
   run:

@@ -5,7 +5,7 @@ Step1 prototype for event-based JEPA pretraining.
 - input: event voxel grids (`synthetic`, `n_imagenet`, `dsec`, `pretrain_mixed`)
 - task: masked token prediction at the same timestamp
 - models: JEPA ViT encoder + predictor in `src/jepa`
-- config: Hydra (`configs/train_step1.yaml`)
+- config: Hydra (`configs/train_jepa.yaml`)
 """
 
 from __future__ import annotations
@@ -1397,7 +1397,7 @@ def _update_ema(
         b_t.copy_(b_s)
 
 
-@hydra.main(version_base="1.3", config_path="../configs", config_name="train_step1")
+@hydra.main(version_base="1.3", config_path="../configs", config_name="train_jepa")
 def main(cfg: DictConfig) -> None:
     maybe_validate_cfg(cfg)
     _configure_data_loader_runtime(cfg)

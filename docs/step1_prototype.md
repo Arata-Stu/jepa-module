@@ -57,7 +57,7 @@ python scripts/train_step1_pretrain.py \
 - `DSECEventsDataset` / `DSECVoxelCollator` を追加し、`data.dsec.load_events/load_rgb/load_labels` でロード対象を切り替えできます。
 - `step1` では同時刻マスク予測までを対象とし、`step2`（時刻シフト + フロー利用）は未実装です。
 - `step2`（時刻シフト + フロー利用）を入れる前段として、まず `step1` の loss が安定して下がるかを確認する用途を想定しています。
-- 設定は `configs/train_step1.yaml` で管理し、CLIは `key=value` で上書きします。
+- 設定は `configs/train_jepa.yaml` で管理し、CLIは `key=value` で上書きします。
 - 崩壊抑制の切替は `collapse_strategy=ema_stopgrad|vicreg|sigreg` です。
 - 学習率/Weight Decay スケジューラは `scheduler.enabled=true` で Warmup + Cosine を有効化できます。
 - 分散学習は `distributed.enabled=true` で有効化し、`torchrun` 経由で起動します。

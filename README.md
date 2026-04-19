@@ -36,7 +36,7 @@ pip install -r requirements.txt
 ├── scripts/
 │   └── train_step1_pretrain.py     # step1: 同時刻マスク予測
 ├── configs/
-│   └── train_step1.yaml            # Hydra 設定
+│   └── train_jepa.yaml             # Hydra 設定（JEPA）
 ├── docs/
 │   ├── step1_prototype.md
 │   └── n_imagenet_data_design.md

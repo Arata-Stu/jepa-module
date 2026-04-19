@@ -1,5 +1,5 @@
 defaults:
-  - train_step1
+  - train_jepa
   - _self_
 
 visualize:
