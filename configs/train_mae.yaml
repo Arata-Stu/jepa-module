@@ -90,6 +90,15 @@ scheduler:
   update_weight_decay: false
   final_weight_decay: ${weight_decay}
 
+# Resume training from checkpoint.
+# - resume_from: explicit checkpoint path (`.../step_XXXXXX.pt`)
+# - auto_resume: when true and resume_from is null, pick latest `out_dir/step_*.pt`
+resume_from: null
+auto_resume: false
+resume_strict: true
+resume_load_optimizer: true
+resume_load_rng_state: true
+
 distributed:
   enabled: false
   backend: auto  # auto | nccl | gloo

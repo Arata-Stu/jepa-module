@@ -1112,8 +1112,13 @@ def maybe_validate_cfg(cfg: DictConfig) -> None:
         raise ValueError("sigreg-proj must be >= 1")
     if int(cfg.batch_size) < 1:
         raise ValueError("batch_size must be >= 1")
+    if int(cfg.steps) < 1:
+        raise ValueError("steps must be >= 1")
     if int(cfg.data.num_workers) < 0:
         raise ValueError("data.num_workers must be >= 0")
+    resume_from_raw = cfg.get("resume_from", None)
+    if resume_from_raw is not None and str(resume_from_raw).strip() == "":
+        raise ValueError("resume_from must be non-empty when set")
 
     prefetch_factor = cfg.data.get("prefetch_factor", None)
     if prefetch_factor is not None and int(prefetch_factor) < 1:
@@ -1397,6 +1402,67 @@ def _update_ema(
         b_t.copy_(b_s)
 
 
+def _checkpoint_step_from_path(path: Path) -> int:
+    stem = path.stem
+    if not stem.startswith("step_"):
+        return -1
+    try:
+        return int(stem.split("_", 1)[1])
+    except ValueError:
+        return -1
+
+
+def _find_latest_checkpoint(out_dir: Path) -> Path | None:
+    candidates = list(out_dir.glob("step_*.pt"))
+    if len(candidates) == 0:
+        return None
+    candidates.sort(key=lambda p: (_checkpoint_step_from_path(p), p.stat().st_mtime))
+    return candidates[-1]
+
+
+def _resolve_resume_checkpoint_path(cfg: DictConfig, out_dir: Path) -> Path | None:
+    resume_from_raw = cfg.get("resume_from", None)
+    if resume_from_raw is not None and str(resume_from_raw).strip() != "":
+        return Path(to_absolute_path(str(resume_from_raw))).resolve()
+    if bool(cfg.get("auto_resume", False)):
+        latest = _find_latest_checkpoint(out_dir=out_dir)
+        if latest is not None:
+            return latest.resolve()
+    return None
+
+
+def _capture_rng_state() -> dict[str, Any]:
+    state: dict[str, Any] = {
+        "python": random.getstate(),
+        "torch": torch.get_rng_state(),
+    }
+    if torch.cuda.is_available():
+        state["torch_cuda"] = torch.cuda.get_rng_state_all()
+    else:
+        state["torch_cuda"] = None
+    return state
+
+
+def _restore_rng_state(
+    rng_state: dict[str, Any],
+    *,
+    restore_cuda: bool = True,
+) -> None:
+    python_state = rng_state.get("python", None)
+    if python_state is not None:
+        random.setstate(python_state)
+
+    torch_state = rng_state.get("torch", None)
+    if torch_state is not None:
+        torch.set_rng_state(torch_state)
+
+    if not restore_cuda:
+        return
+    cuda_state = rng_state.get("torch_cuda", None)
+    if cuda_state is not None and torch.cuda.is_available():
+        torch.cuda.set_rng_state_all(cuda_state)
+
+
 @hydra.main(version_base="1.3", config_path="../configs", config_name="train_jepa")
 def main(cfg: DictConfig) -> None:
     maybe_validate_cfg(cfg)
@@ -1506,47 +1572,103 @@ def main(cfg: DictConfig) -> None:
     metrics_file = Path(to_absolute_path(str(cfg.metrics_file)))
     metrics_file.parent.mkdir(parents=True, exist_ok=True)
 
+    start_step = 0
+    resume_path = _resolve_resume_checkpoint_path(cfg=cfg, out_dir=out_dir)
+    if resume_path is not None:
+        if not resume_path.exists():
+            raise FileNotFoundError(f"resume checkpoint not found: {resume_path}")
+
+        checkpoint = torch.load(resume_path, map_location="cpu")
+        resume_strict = bool(cfg.get("resume_strict", True))
+        resume_load_optimizer = bool(cfg.get("resume_load_optimizer", True))
+        resume_load_rng_state = bool(cfg.get("resume_load_rng_state", True))
+
+        unwrap_module(encoder).load_state_dict(
+            checkpoint["encoder"], strict=resume_strict
+        )
+        unwrap_module(predictor).load_state_dict(
+            checkpoint["predictor"], strict=resume_strict
+        )
+
+        if teacher_encoder is not None:
+            teacher_state = checkpoint.get("teacher_encoder", None)
+            if teacher_state is None:
+                teacher_encoder.load_state_dict(
+                    unwrap_module(encoder).state_dict(), strict=False
+                )
+                if main_process:
+                    print(
+                        "[resume][WARN] teacher_encoder state is missing in checkpoint; "
+                        "initialized from encoder."
+                    )
+            else:
+                teacher_encoder.load_state_dict(teacher_state, strict=resume_strict)
+
+        if resume_load_optimizer:
+            optimizer_state = checkpoint.get("optimizer", None)
+            if optimizer_state is None:
+                if main_process:
+                    print(
+                        "[resume][WARN] optimizer state is missing in checkpoint; "
+                        "optimizer is re-initialized."
+                    )
+            else:
+                optimizer.load_state_dict(optimizer_state)
+
+        start_step = int(checkpoint.get("step", 0))
+        if start_step < 0:
+            raise ValueError(f"checkpoint step must be >= 0, got {start_step}")
+        if start_step >= int(cfg.steps):
+            raise ValueError(
+                f"checkpoint step ({start_step}) must be < total steps ({int(cfg.steps)}) "
+                "to continue training"
+            )
+
+        if resume_load_rng_state:
+            if dist_state.enabled and dist_state.world_size > 1:
+                if main_process:
+                    print(
+                        "[resume][WARN] skip RNG restore in distributed mode; "
+                        "RNG state in checkpoint is single-rank."
+                    )
+            else:
+                rng_state = checkpoint.get("rng_state", None)
+                if isinstance(rng_state, dict):
+                    _restore_rng_state(rng_state, restore_cuda=(device.type == "cuda"))
+                elif main_process:
+                    print(
+                        "[resume][WARN] rng_state is missing in checkpoint; "
+                        "random streams continue from current process state."
+                    )
+
+        if main_process:
+            print(f"[resume] loaded checkpoint={resume_path} at step={start_step}")
+
     tensorboard_writer = None
     tensorboard_dir = None
     if main_process and bool(cfg.logging.tensorboard.enabled):
         tensorboard_dir = log_dir / str(cfg.logging.tensorboard.subdir)
         tensorboard_dir.mkdir(parents=True, exist_ok=True)
         assert SummaryWriter is not None
-        tensorboard_writer = SummaryWriter(log_dir=str(tensorboard_dir))
-        tensorboard_writer.add_text("run/config", OmegaConf.to_yaml(cfg), 0)
+        writer_kwargs: dict[str, Any] = {}
+        if start_step > 0:
+            writer_kwargs["purge_step"] = start_step + 1
+        tensorboard_writer = SummaryWriter(log_dir=str(tensorboard_dir), **writer_kwargs)
+        tensorboard_writer.add_text("run/config", OmegaConf.to_yaml(cfg), start_step)
 
     metrics_fp = None
     metrics_writer = None
     eval_metrics_fp = None
     eval_metrics_writer = None
     if main_process:
-        metrics_fp = metrics_file.open("w", newline="", encoding="utf-8")
+        metrics_mode = "a" if start_step > 0 and metrics_file.exists() else "w"
+        metrics_fp = metrics_file.open(metrics_mode, newline="", encoding="utf-8")
         metrics_writer = csv.writer(metrics_fp)
-        metrics_writer.writerow(
-            [
-                "step",
-                "batch_size",
-                "loss",
-                "recon",
-                "context_recon",
-                "context_loss",
-                "context_lambda",
-                "sig",
-                "std",
-                "cov",
-                "lr",
-                "weight_decay",
-                "context_tokens",
-                "pred_tokens",
-            ]
-        )
-        if eval_provider is not None:
-            eval_metrics_file = log_dir / "eval_metrics.csv"
-            eval_metrics_fp = eval_metrics_file.open("w", newline="", encoding="utf-8")
-            eval_metrics_writer = csv.writer(eval_metrics_fp)
-            eval_metrics_writer.writerow(
+        if metrics_mode == "w":
+            metrics_writer.writerow(
                 [
                     "step",
+                    "batch_size",
                     "loss",
                     "recon",
                     "context_recon",
@@ -1555,9 +1677,34 @@ def main(cfg: DictConfig) -> None:
                     "sig",
                     "std",
                     "cov",
-                    "eval_steps",
+                    "lr",
+                    "weight_decay",
+                    "context_tokens",
+                    "pred_tokens",
                 ]
             )
+        if eval_provider is not None:
+            eval_metrics_file = log_dir / "eval_metrics.csv"
+            eval_mode = (
+                "a" if start_step > 0 and eval_metrics_file.exists() else "w"
+            )
+            eval_metrics_fp = eval_metrics_file.open(eval_mode, newline="", encoding="utf-8")
+            eval_metrics_writer = csv.writer(eval_metrics_fp)
+            if eval_mode == "w":
+                eval_metrics_writer.writerow(
+                    [
+                        "step",
+                        "loss",
+                        "recon",
+                        "context_recon",
+                        "context_loss",
+                        "context_lambda",
+                        "sig",
+                        "std",
+                        "cov",
+                        "eval_steps",
+                    ]
+                )
 
     if main_process:
         print(
@@ -1569,11 +1716,12 @@ def main(cfg: DictConfig) -> None:
             f"dataset_samples={dataset_samples if dataset_samples is not None else 'n/a'} "
             f"eval_dataset_samples={eval_dataset_samples if eval_dataset_samples is not None else 'n/a'} "
             f"log_dir={log_dir} ckpt_dir={out_dir} metrics_file={metrics_file} "
-            f"tensorboard_dir={tensorboard_dir if tensorboard_dir is not None else 'disabled'}"
+            f"tensorboard_dir={tensorboard_dir if tensorboard_dir is not None else 'disabled'} "
+            f"resume_step={start_step}"
         )
 
     try:
-        for step in range(1, int(cfg.steps) + 1):
+        for step in range(start_step + 1, int(cfg.steps) + 1):
             step_lr = (
                 float(lr_scheduler.step(step))
                 if lr_scheduler is not None
@@ -1820,16 +1968,17 @@ def main(cfg: DictConfig) -> None:
 
             if main_process and int(cfg.save_every) > 0 and step % int(cfg.save_every) == 0:
                 ckpt_path = out_dir / f"step_{step:06d}.pt"
-                torch.save(
-                    {
-                        "step": step,
-                        "cfg": OmegaConf.to_container(cfg, resolve=True),
-                        "encoder": unwrap_module(encoder).state_dict(),
-                        "predictor": unwrap_module(predictor).state_dict(),
-                        "optimizer": optimizer.state_dict(),
-                    },
-                    ckpt_path,
-                )
+                payload: dict[str, Any] = {
+                    "step": step,
+                    "cfg": OmegaConf.to_container(cfg, resolve=True),
+                    "encoder": unwrap_module(encoder).state_dict(),
+                    "predictor": unwrap_module(predictor).state_dict(),
+                    "optimizer": optimizer.state_dict(),
+                    "rng_state": _capture_rng_state(),
+                }
+                if teacher_encoder is not None:
+                    payload["teacher_encoder"] = teacher_encoder.state_dict()
+                torch.save(payload, ckpt_path)
                 print(f"saved={ckpt_path}")
     finally:
         if metrics_fp is not None:

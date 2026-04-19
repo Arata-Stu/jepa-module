@@ -72,6 +72,30 @@ python scripts/train_jepa_pretrain.py
   `scheduler.enabled=true` で実行されます。
 - 無効化したい場合は `data.pretrain_mixed.augment.enabled=false scheduler.enabled=false` を指定してください。
 
+### 途中再開（checkpoint resume）
+
+```bash
+source env/bin/activate
+
+# 明示パスから再開
+python scripts/train_jepa_pretrain.py \
+  resume_from=/absolute/path/to/checkpoints/step_050000.pt \
+  steps=100000
+
+# out_dir 内の最新 checkpoint から自動再開
+python scripts/train_jepa_pretrain.py \
+  hydra.run.dir=/absolute/path/to/previous/run \
+  out_dir=/absolute/path/to/previous/run/checkpoints \
+  log_dir=/absolute/path/to/previous/run/logs \
+  metrics_file=/absolute/path/to/previous/run/logs/train_metrics.csv \
+  auto_resume=true \
+  steps=100000
+```
+
+- checkpoint には model / optimizer / step / RNG state が保存されます。
+- `ema_stopgrad` の場合は teacher(EMA) も保存され、同状態から再開されます。
+- `resume_load_optimizer=false` や `resume_load_rng_state=false` で部分再開も可能です。
+
 ### N-ImageNet
 
 ```bash
