@@ -1,0 +1,30 @@
+defaults:
+  - train_step1
+  - _self_
+
+# MAE training config (inherits data/runtime options from train_step1.yaml)
+
+steps: 1000000
+
+out_dir: ${hydra:runtime.output_dir}/checkpoints_mae
+log_dir: ${hydra:runtime.output_dir}/logs_mae
+metrics_file: ${hydra:runtime.output_dir}/logs_mae/train_metrics.csv
+
+temporal_mix:
+  enabled: false
+  short_t: 1
+  image_prob: 0.0
+  short_mode: sum
+
+mae:
+  mask_ratio: 0.75
+  recon_loss: mse            # mse | smooth_l1
+  loss_on_mask_only: true    # true: MAE paper style, false: all tokens
+  normalize_targets: false
+
+  encoder_use_rope: true
+  decoder_embed_dim: 384
+  decoder_depth: 4
+  decoder_heads: null        # null => model-size default
+  decoder_mlp_ratio: 4.0
+  decoder_use_silu: false

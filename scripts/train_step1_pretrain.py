@@ -122,6 +122,96 @@ def _predictor_modality(cfg: DictConfig, temporal_bins: int) -> str:
     return "video"
 
 
+def _context_loss_enabled(cfg: DictConfig) -> bool:
+    context_cfg = cfg.get("context_loss", None)
+    if context_cfg is None:
+        return False
+    return bool(context_cfg.get("enabled", False))
+
+
+def _context_lambda_value(cfg: DictConfig, step: int) -> float:
+    context_cfg = cfg.get("context_loss", None)
+    if context_cfg is None:
+        return 0.0
+
+    lambda_value = float(context_cfg.get("lambda_value", 0.0))
+    warmup_cfg = context_cfg.get("lambda_warmup", None)
+    if warmup_cfg is None or not bool(warmup_cfg.get("enabled", False)):
+        return lambda_value
+
+    start_step = int(warmup_cfg.get("start_step", 15_000))
+    end_step = int(warmup_cfg.get("end_step", 30_000))
+    if step < start_step:
+        return 0.0
+    if step >= end_step:
+        return lambda_value
+    alpha = float(step - start_step) / float(end_step - start_step)
+    return lambda_value * alpha
+
+
+def _separate_token_positions(
+    ids: torch.Tensor,
+    h_patches: int,
+    w_patches: int,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    tokens_per_frame = int(h_patches * w_patches)
+    d = torch.div(ids, tokens_per_frame, rounding_mode="floor")
+    rem = ids - d * tokens_per_frame
+    h = torch.div(rem, w_patches, rounding_mode="floor")
+    w = rem - h * w_patches
+    return d.float(), h.float(), w.float()
+
+
+def _compute_context_distance_weights(
+    masks_pred: torch.Tensor,
+    masks_enc: torch.Tensor,
+    h_patches: int,
+    w_patches: int,
+    offset_context_loss: bool,
+    distance_eps: float,
+) -> torch.Tensor:
+    d_enc, h_enc, w_enc = _separate_token_positions(
+        masks_enc, h_patches=h_patches, w_patches=w_patches
+    )
+    d_pred, h_pred, w_pred = _separate_token_positions(
+        masks_pred, h_patches=h_patches, w_patches=w_patches
+    )
+
+    enc_pos = torch.stack([d_enc, h_enc, w_enc], dim=-1)  # [B, N_enc, 3]
+    pred_pos = torch.stack([d_pred, h_pred, w_pred], dim=-1)  # [B, N_pred, 3]
+
+    dmin = torch.cdist(enc_pos, pred_pos, p=2).min(dim=-1).values  # [B, N_enc]
+    if offset_context_loss:
+        coeff = max(1.0, float(max(h_patches, w_patches) // 16))
+        dmin = dmin / coeff
+    dmin = dmin.sqrt()
+    return 1.0 / torch.clamp(dmin, min=distance_eps)
+
+
+def _recon_loss(
+    pred: torch.Tensor,
+    target: torch.Tensor,
+    loss_name: str,
+) -> torch.Tensor:
+    if loss_name == "smooth_l1":
+        return F.smooth_l1_loss(pred, target)
+    return F.mse_loss(pred, target)
+
+
+def _weighted_recon_loss(
+    pred: torch.Tensor,
+    target: torch.Tensor,
+    loss_name: str,
+    token_weights: torch.Tensor,
+) -> torch.Tensor:
+    if loss_name == "smooth_l1":
+        per_elem = F.smooth_l1_loss(pred, target, reduction="none")
+    else:
+        per_elem = F.mse_loss(pred, target, reduction="none")
+    weighted = per_elem * token_weights.unsqueeze(-1).to(dtype=per_elem.dtype)
+    return weighted.mean()
+
+
 def build_models(cfg: DictConfig) -> Tuple[torch.nn.Module, torch.nn.Module]:
     spec = MODEL_SPECS[str(cfg.model_size)]
     encoder_builder: Callable[..., torch.nn.Module] = spec["builder"]  # type: ignore[assignment]
@@ -165,6 +255,7 @@ def build_models(cfg: DictConfig) -> Tuple[torch.nn.Module, torch.nn.Module]:
         num_mask_tokens=int(cfg.num_mask_tokens),
         modality_embedding=temporal_mix_enabled,
         img_temporal_dim_size=img_temporal_dim_size,
+        return_all_tokens=_context_loss_enabled(cfg),
         n_output_distillation=4,
     )
     return encoder, predictor
@@ -759,6 +850,7 @@ def forward_step(
 ) -> dict[str, Any]:
     inputs, temporal_bins = _prepare_temporal_inputs(cfg=cfg, inputs=inputs, training=training)
     predictor_mod = _predictor_modality(cfg, temporal_bins)
+    use_context_loss = _context_loss_enabled(cfg)
     mask_generator = mask_generators.get(temporal_bins)
     if mask_generator is None:
         raise ValueError(
@@ -774,14 +866,17 @@ def forward_step(
     if collapse_strategy == "ema_stopgrad":
         assert teacher_encoder is not None
         with torch.no_grad():
-            teacher_tokens = teacher_encoder(inputs, training=True)
-            teacher_tokens = apply_masks(teacher_tokens, [masks_pred])
+            teacher_all_tokens = teacher_encoder(inputs, training=True)
     else:
-        teacher_tokens = encoder(inputs, training=True)
-        teacher_tokens = apply_masks(teacher_tokens, [masks_pred])
+        teacher_all_tokens = encoder(inputs, training=True)
+
+    teacher_tokens = apply_masks(teacher_all_tokens, [masks_pred])
+    teacher_context_tokens = None
+    if use_context_loss:
+        teacher_context_tokens = apply_masks(teacher_all_tokens, [masks_enc])
 
     context_tokens = encoder(inputs, masks=[masks_enc], training=True)
-    pred_tokens, _ = predictor(
+    pred_tokens, pred_context_tokens = predictor(
         context_tokens,
         masks_x=[masks_enc],
         masks_y=[masks_pred],
@@ -792,11 +887,59 @@ def forward_step(
     if bool(cfg.normalize_targets):
         teacher_tokens = F.layer_norm(teacher_tokens, (teacher_tokens.shape[-1],))
         pred_tokens = F.layer_norm(pred_tokens, (pred_tokens.shape[-1],))
+        if use_context_loss:
+            assert teacher_context_tokens is not None
+            if pred_context_tokens is None:
+                raise RuntimeError(
+                    "context_loss.enabled=true requires predictor return_all_tokens=True"
+                )
+            teacher_context_tokens = F.layer_norm(
+                teacher_context_tokens, (teacher_context_tokens.shape[-1],)
+            )
+            pred_context_tokens = F.layer_norm(
+                pred_context_tokens, (pred_context_tokens.shape[-1],)
+            )
 
-    if str(cfg.recon_loss) == "smooth_l1":
-        recon_loss = F.smooth_l1_loss(pred_tokens, teacher_tokens)
-    else:
-        recon_loss = F.mse_loss(pred_tokens, teacher_tokens)
+    recon_loss_name = str(cfg.recon_loss)
+    recon_loss = _recon_loss(pred_tokens, teacher_tokens, loss_name=recon_loss_name)
+
+    context_recon_loss = pred_tokens.new_zeros(())
+    context_loss = pred_tokens.new_zeros(())
+    context_lambda = 0.0
+    if use_context_loss:
+        assert teacher_context_tokens is not None
+        if pred_context_tokens is None:
+            raise RuntimeError(
+                "context_loss.enabled=true requires predictor return_all_tokens=True"
+            )
+        weight_by_distance = bool(cfg.context_loss.get("weight_by_distance", False))
+        offset_context_loss = bool(cfg.context_loss.get("offset_context_loss", False))
+        distance_eps = float(cfg.context_loss.get("distance_eps", 1e-6))
+        if weight_by_distance:
+            h_patches = int(cfg.height) // int(cfg.patch_size)
+            w_patches = int(cfg.width) // int(cfg.patch_size)
+            d_weights = _compute_context_distance_weights(
+                masks_pred=masks_pred,
+                masks_enc=masks_enc,
+                h_patches=h_patches,
+                w_patches=w_patches,
+                offset_context_loss=offset_context_loss,
+                distance_eps=distance_eps,
+            )
+            context_recon_loss = _weighted_recon_loss(
+                pred_context_tokens,
+                teacher_context_tokens,
+                loss_name=recon_loss_name,
+                token_weights=d_weights,
+            )
+        else:
+            context_recon_loss = _recon_loss(
+                pred_context_tokens,
+                teacher_context_tokens,
+                loss_name=recon_loss_name,
+            )
+        context_lambda = _context_lambda_value(cfg, step=step)
+        context_loss = context_recon_loss * context_lambda
 
     sig_loss = pred_tokens.new_zeros(())
     if collapse_strategy == "sigreg":
@@ -811,6 +954,7 @@ def forward_step(
 
     loss = (
         recon_loss
+        + context_loss
         + sigreg_weight * sig_loss
         + vicreg_std_weight * std_loss
         + vicreg_cov_weight * cov_loss
@@ -818,6 +962,9 @@ def forward_step(
     return {
         "loss": loss,
         "recon_loss": recon_loss,
+        "context_recon_loss": context_recon_loss,
+        "context_loss": context_loss,
+        "context_lambda": float(context_lambda),
         "sig_loss": sig_loss,
         "std_loss": std_loss,
         "cov_loss": cov_loss,
@@ -851,6 +998,9 @@ def run_eval(
     totals = {
         "loss": 0.0,
         "recon_loss": 0.0,
+        "context_recon_loss": 0.0,
+        "context_loss": 0.0,
+        "context_lambda": 0.0,
         "sig_loss": 0.0,
         "std_loss": 0.0,
         "cov_loss": 0.0,
@@ -878,6 +1028,9 @@ def run_eval(
         )
         totals["loss"] += _extract_scalar(metrics["loss"])
         totals["recon_loss"] += _extract_scalar(metrics["recon_loss"])
+        totals["context_recon_loss"] += _extract_scalar(metrics["context_recon_loss"])
+        totals["context_loss"] += _extract_scalar(metrics["context_loss"])
+        totals["context_lambda"] += _extract_scalar(metrics["context_lambda"])
         totals["sig_loss"] += _extract_scalar(metrics["sig_loss"])
         totals["std_loss"] += _extract_scalar(metrics["std_loss"])
         totals["cov_loss"] += _extract_scalar(metrics["cov_loss"])
@@ -920,6 +1073,22 @@ def maybe_validate_cfg(cfg: DictConfig) -> None:
         raise ValueError("tubelet-size must be >= 1")
     if int(cfg.t_bins) % int(cfg.tubelet_size) != 0:
         raise ValueError("t-bins must be divisible by tubelet-size")
+    if _context_loss_enabled(cfg):
+        context_cfg = cfg.context_loss
+        if float(context_cfg.lambda_value) < 0:
+            raise ValueError("context_loss.lambda_value must be >= 0")
+        if float(context_cfg.get("distance_eps", 1e-6)) <= 0:
+            raise ValueError("context_loss.distance_eps must be > 0")
+        warmup_cfg = context_cfg.get("lambda_warmup", None)
+        if warmup_cfg is not None and bool(warmup_cfg.get("enabled", False)):
+            start_step = int(warmup_cfg.get("start_step", 15_000))
+            end_step = int(warmup_cfg.get("end_step", 30_000))
+            if start_step < 0:
+                raise ValueError("context_loss.lambda_warmup.start_step must be >= 0")
+            if end_step <= start_step:
+                raise ValueError(
+                    "context_loss.lambda_warmup.end_step must be > start_step"
+                )
     if _temporal_mix_enabled(cfg):
         short_t = int(cfg.temporal_mix.short_t)
         if short_t < 1 or short_t > int(cfg.t_bins):
@@ -1359,6 +1528,9 @@ def main(cfg: DictConfig) -> None:
                 "batch_size",
                 "loss",
                 "recon",
+                "context_recon",
+                "context_loss",
+                "context_lambda",
                 "sig",
                 "std",
                 "cov",
@@ -1373,7 +1545,18 @@ def main(cfg: DictConfig) -> None:
             eval_metrics_fp = eval_metrics_file.open("w", newline="", encoding="utf-8")
             eval_metrics_writer = csv.writer(eval_metrics_fp)
             eval_metrics_writer.writerow(
-                ["step", "loss", "recon", "sig", "std", "cov", "eval_steps"]
+                [
+                    "step",
+                    "loss",
+                    "recon",
+                    "context_recon",
+                    "context_loss",
+                    "context_lambda",
+                    "sig",
+                    "std",
+                    "cov",
+                    "eval_steps",
+                ]
             )
 
     if main_process:
@@ -1445,6 +1628,9 @@ def main(cfg: DictConfig) -> None:
 
             step_loss = _extract_scalar(step_metrics["loss"])
             step_recon = _extract_scalar(step_metrics["recon_loss"])
+            step_context_recon = _extract_scalar(step_metrics["context_recon_loss"])
+            step_context_loss = _extract_scalar(step_metrics["context_loss"])
+            step_context_lambda = _extract_scalar(step_metrics["context_lambda"])
             step_sig = _extract_scalar(step_metrics["sig_loss"])
             step_std = _extract_scalar(step_metrics["std_loss"])
             step_cov = _extract_scalar(step_metrics["cov_loss"])
@@ -1455,6 +1641,9 @@ def main(cfg: DictConfig) -> None:
             if dist_state.enabled:
                 step_loss = reduce_mean_scalar(step_loss, device=device)
                 step_recon = reduce_mean_scalar(step_recon, device=device)
+                step_context_recon = reduce_mean_scalar(step_context_recon, device=device)
+                step_context_loss = reduce_mean_scalar(step_context_loss, device=device)
+                step_context_lambda = reduce_mean_scalar(step_context_lambda, device=device)
                 step_sig = reduce_mean_scalar(step_sig, device=device)
                 step_std = reduce_mean_scalar(step_std, device=device)
                 step_cov = reduce_mean_scalar(step_cov, device=device)
@@ -1469,6 +1658,9 @@ def main(cfg: DictConfig) -> None:
                         step_batch_size,
                         f"{step_loss:.8f}",
                         f"{step_recon:.8f}",
+                        f"{step_context_recon:.8f}",
+                        f"{step_context_loss:.8f}",
+                        f"{step_context_lambda:.8f}",
                         f"{step_sig:.8f}",
                         f"{step_std:.8f}",
                         f"{step_cov:.8f}",
@@ -1483,6 +1675,21 @@ def main(cfg: DictConfig) -> None:
             if tensorboard_writer is not None:
                 tensorboard_writer.add_scalar("train/loss", step_loss, step)
                 tensorboard_writer.add_scalar("train/recon", step_recon, step)
+                tensorboard_writer.add_scalar(
+                    "train/context_recon",
+                    step_context_recon,
+                    step,
+                )
+                tensorboard_writer.add_scalar(
+                    "train/context_loss",
+                    step_context_loss,
+                    step,
+                )
+                tensorboard_writer.add_scalar(
+                    "train/context_lambda",
+                    step_context_lambda,
+                    step,
+                )
                 tensorboard_writer.add_scalar("train/sig", step_sig, step)
                 tensorboard_writer.add_scalar("train/std", step_std, step)
                 tensorboard_writer.add_scalar("train/cov", step_cov, step)
@@ -1519,6 +1726,9 @@ def main(cfg: DictConfig) -> None:
                     f"step={step:05d}/{int(cfg.steps):05d} "
                     f"loss={step_loss:.6f} "
                     f"recon={step_recon:.6f} "
+                    f"context_recon={step_context_recon:.6f} "
+                    f"context_loss={step_context_loss:.6f} "
+                    f"context_lambda={step_context_lambda:.4f} "
                     f"sig={step_sig:.6f} "
                     f"std={step_std:.6f} "
                     f"cov={step_cov:.6f} "
@@ -1565,6 +1775,9 @@ def main(cfg: DictConfig) -> None:
                             step,
                             f"{eval_stats['loss']:.8f}",
                             f"{eval_stats['recon_loss']:.8f}",
+                            f"{eval_stats['context_recon_loss']:.8f}",
+                            f"{eval_stats['context_loss']:.8f}",
+                            f"{eval_stats['context_lambda']:.8f}",
                             f"{eval_stats['sig_loss']:.8f}",
                             f"{eval_stats['std_loss']:.8f}",
                             f"{eval_stats['cov_loss']:.8f}",
@@ -1576,6 +1789,21 @@ def main(cfg: DictConfig) -> None:
                 if tensorboard_writer is not None:
                     tensorboard_writer.add_scalar("eval/loss", eval_stats["loss"], step)
                     tensorboard_writer.add_scalar("eval/recon", eval_stats["recon_loss"], step)
+                    tensorboard_writer.add_scalar(
+                        "eval/context_recon",
+                        eval_stats["context_recon_loss"],
+                        step,
+                    )
+                    tensorboard_writer.add_scalar(
+                        "eval/context_loss",
+                        eval_stats["context_loss"],
+                        step,
+                    )
+                    tensorboard_writer.add_scalar(
+                        "eval/context_lambda",
+                        eval_stats["context_lambda"],
+                        step,
+                    )
                     tensorboard_writer.add_scalar("eval/sig", eval_stats["sig_loss"], step)
                     tensorboard_writer.add_scalar("eval/std", eval_stats["std_loss"], step)
                     tensorboard_writer.add_scalar("eval/cov", eval_stats["cov_loss"], step)
@@ -1584,7 +1812,10 @@ def main(cfg: DictConfig) -> None:
                     print(
                         f"eval@step={step:05d} "
                         f"loss={eval_stats['loss']:.6f} "
-                        f"recon={eval_stats['recon_loss']:.6f}"
+                        f"recon={eval_stats['recon_loss']:.6f} "
+                        f"context_recon={eval_stats['context_recon_loss']:.6f} "
+                        f"context_loss={eval_stats['context_loss']:.6f} "
+                        f"context_lambda={eval_stats['context_lambda']:.4f}"
                     )
 
             if main_process and int(cfg.save_every) > 0 and step % int(cfg.save_every) == 0:

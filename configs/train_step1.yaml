@@ -34,6 +34,17 @@ normalize_targets: false
 
 recon_loss: smooth_l1
 
+context_loss:
+  enabled: false
+  weight_by_distance: false
+  offset_context_loss: false
+  distance_eps: 1.0e-6
+  lambda_value: 0.5
+  lambda_warmup:
+    enabled: true
+    start_step: 15000
+    end_step: 30000
+
 sigreg_weight: 0.0
 sigreg_knots: 17
 sigreg_proj: 1024

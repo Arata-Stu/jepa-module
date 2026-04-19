@@ -11,6 +11,7 @@ from .vision_transformer import (
     vit_tiny,
 )
 from .predictor import VisionTransformerPredictor, vit_predictor
+from .mae import MAEForwardOutput, VoxelMAE
 
 __all__ = [
     "VisionTransformer",
@@ -25,4 +26,6 @@ __all__ = [
     "vit_huge_rope",
     "vit_giant",
     "vit_predictor",
+    "VoxelMAE",
+    "MAEForwardOutput",
 ]
