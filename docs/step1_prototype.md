@@ -1,6 +1,6 @@
 # Step1 Prototype (Masked Prediction)
 
-`scripts/train_step1_pretrain.py` は、イベントデータ向け JEPA 事前学習の `step1` を単体で試すための最小プロトタイプです。
+`scripts/train_jepa_pretrain.py` は、イベントデータ向け JEPA 事前学習の `step1` を単体で試すための最小プロトタイプです。
 
 - 入力: voxel grid（`synthetic` / `n_imagenet` / `dsec`）
 - 目的: 同一時刻内でマスク領域のトークン特徴を予測
@@ -12,7 +12,7 @@
 
 ```bash
 source env/bin/activate
-python scripts/train_step1_pretrain.py \
+python scripts/train_jepa_pretrain.py \
   data.source=synthetic \
   model_size=tiny \
   steps=200 \
@@ -26,7 +26,7 @@ python scripts/train_step1_pretrain.py \
 
 ```bash
 source env/bin/activate
-python scripts/train_step1_pretrain.py \
+python scripts/train_jepa_pretrain.py \
   data.source=n_imagenet \
   data.n_imagenet.split=train \
   data.n_imagenet.train_list=/absolute/path/to/train_list.txt \
@@ -39,7 +39,7 @@ python scripts/train_step1_pretrain.py \
 
 ```bash
 source env/bin/activate
-python scripts/train_step1_pretrain.py \
+python scripts/train_jepa_pretrain.py \
   data.source=dsec \
   data.dsec.root_dir=/absolute/path/to/dsec_root \
   data.dsec.split=train \

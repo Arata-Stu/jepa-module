@@ -2,7 +2,7 @@
 """
 Visualize pretraining event voxels as RGB images (white background, red/blue events).
 
-This script reuses the same Hydra config and loader build path as train_step1_pretrain.py.
+This script reuses the same Hydra config and loader build path as train_jepa_pretrain.py.
 """
 
 from __future__ import annotations
@@ -21,7 +21,7 @@ from hydra.core.hydra_config import HydraConfig
 from omegaconf import DictConfig
 from torchvision.utils import save_image
 
-from train_step1_pretrain import (
+from train_jepa_pretrain import (
     _configure_data_loader_runtime,
     PRETRAIN_MIXED_SOURCE_NAMES,
     maybe_validate_cfg,

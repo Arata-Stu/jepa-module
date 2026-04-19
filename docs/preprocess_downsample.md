@@ -156,7 +156,7 @@ python scripts/downsample_n_imagenet.py \
 
 ## 学習ローダとの連携（DSEC）
 
-`scripts/train_step1_pretrain.py` の DSEC 設定で、読み込むイベントファイルを切り替え可能です。
+`scripts/train_jepa_pretrain.py` の DSEC 設定で、読み込むイベントファイルを切り替え可能です。
 
 ```yaml
 data:

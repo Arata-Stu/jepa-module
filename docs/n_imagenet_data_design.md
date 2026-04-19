@@ -14,7 +14,7 @@
   - `NImageNetVoxelBatchProvider`: `DataLoader` をラップして `next_batch()` を提供。
   - `DistributedSampler` 対応（`distributed.enabled=true` のとき rank ごとに shard）。
   - `SyntheticVoxelBatchProvider`: 既存の synthetic 供給器。
-- `scripts/train_step1_pretrain.py`
+- `scripts/train_jepa_pretrain.py`
   - `build_batch_provider(...)` で `data.source` に応じて provider を切り替え。
 
 ## データフロー

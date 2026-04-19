@@ -45,7 +45,7 @@ from jepa.utils.distributed import (  # noqa: E402
     unwrap_module,
 )
 from jepa.utils.schedulers import WarmupCosineParamScheduler  # noqa: E402
-from train_step1_pretrain import (  # noqa: E402
+from train_jepa_pretrain import (  # noqa: E402
     MODEL_SPECS,
     PRETRAIN_MIXED_SOURCE_NAMES,
     _compute_source_ratios,

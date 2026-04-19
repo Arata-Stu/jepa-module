@@ -34,7 +34,7 @@ pip install -r requirements.txt
 │       ├── utils/                  # distributed / scheduler utility
 │       └── regularizers.py         # SIGReg / VICReg
 ├── scripts/
-│   └── train_step1_pretrain.py     # step1: 同時刻マスク予測
+│   └── train_jepa_pretrain.py     # step1: 同時刻マスク予測
 ├── configs/
 │   └── train_jepa.yaml             # Hydra 設定（JEPA）
 ├── docs/
@@ -49,7 +49,7 @@ pip install -r requirements.txt
 
 ```bash
 source env/bin/activate
-python scripts/train_step1_pretrain.py \
+python scripts/train_jepa_pretrain.py \
   data.source=synthetic \
   model_size=tiny \
   steps=200 \
@@ -65,7 +65,7 @@ python scripts/train_step1_pretrain.py \
 
 ```bash
 source env/bin/activate
-python scripts/train_step1_pretrain.py
+python scripts/train_jepa_pretrain.py
 ```
 
 - デフォルトでは `data.pretrain_mixed.augment.enabled=true`（RRC含む）と
@@ -76,7 +76,7 @@ python scripts/train_step1_pretrain.py
 
 ```bash
 source env/bin/activate
-python scripts/train_step1_pretrain.py \
+python scripts/train_jepa_pretrain.py \
   data.source=n_imagenet \
   data.n_imagenet.split=train \
   data.n_imagenet.train_list=/absolute/path/to/train_list.txt \
@@ -90,7 +90,7 @@ python scripts/train_step1_pretrain.py \
 
 ```bash
 source env/bin/activate
-python scripts/train_step1_pretrain.py \
+python scripts/train_jepa_pretrain.py \
   data.source=dsec \
   data.dsec.root_dir=/absolute/path/to/dsec_root \
   data.dsec.split=train \
@@ -106,7 +106,7 @@ python scripts/train_step1_pretrain.py \
 
 ```bash
 source env/bin/activate
-python scripts/train_step1_pretrain.py \
+python scripts/train_jepa_pretrain.py \
   data.source=pretrain_mixed \
   eval.enabled=false \
   t_bins=10 \
@@ -178,9 +178,9 @@ python scripts/visualize_pretrain_voxels.py \
 
 ```bash
 source env/bin/activate
-python scripts/train_step1_pretrain.py collapse_strategy=ema_stopgrad steps=200
-python scripts/train_step1_pretrain.py collapse_strategy=vicreg steps=200 vicreg_std_weight=0.1 vicreg_cov_weight=0.01
-python scripts/train_step1_pretrain.py collapse_strategy=sigreg steps=200 sigreg_weight=0.01
+python scripts/train_jepa_pretrain.py collapse_strategy=ema_stopgrad steps=200
+python scripts/train_jepa_pretrain.py collapse_strategy=vicreg steps=200 vicreg_std_weight=0.1 vicreg_cov_weight=0.01
+python scripts/train_jepa_pretrain.py collapse_strategy=sigreg steps=200 sigreg_weight=0.01
 ```
 
 ## Ablation 実行コマンド集
@@ -217,14 +217,14 @@ temporal_mix.short_mode=sum"
 JEPA（このリポジトリ本体）
 
 ```bash
-python scripts/train_step1_pretrain.py ${BASE_ARGS} \
+python scripts/train_jepa_pretrain.py ${BASE_ARGS} \
   collapse_strategy=ema_stopgrad \
   hydra.run.dir=outputs/ablations/method_jepa_seed0
 ```
 
 MEM / MAE（`tmp/mem` 実装）
 
-このリポジトリの `scripts/train_step1_pretrain.py` は JEPA 系のみ実装です。  
+このリポジトリの `scripts/train_jepa_pretrain.py` は JEPA 系のみ実装です。  
 `MEM/MAE` は `tmp/mem` の実装を使って比較してください。
 
 ```bash
@@ -256,16 +256,16 @@ torchrun --standalone --nproc_per_node=1 run_mem_pretraining.py \
 ### 2. 勾配更新方式（JEPA 内）
 
 ```bash
-python scripts/train_step1_pretrain.py ${BASE_ARGS} \
+python scripts/train_jepa_pretrain.py ${BASE_ARGS} \
   collapse_strategy=ema_stopgrad \
   hydra.run.dir=outputs/ablations/collapse_ema_stopgrad_seed0
 
-python scripts/train_step1_pretrain.py ${BASE_ARGS} \
+python scripts/train_jepa_pretrain.py ${BASE_ARGS} \
   collapse_strategy=vicreg \
   vicreg_std_weight=0.1 vicreg_cov_weight=0.01 \
   hydra.run.dir=outputs/ablations/collapse_vicreg_seed0
 
-python scripts/train_step1_pretrain.py ${BASE_ARGS} \
+python scripts/train_jepa_pretrain.py ${BASE_ARGS} \
   collapse_strategy=sigreg \
   sigreg_weight=0.01 \
   hydra.run.dir=outputs/ablations/collapse_sigreg_seed0
@@ -275,40 +275,40 @@ python scripts/train_step1_pretrain.py ${BASE_ARGS} \
 
 ```bash
 # hflip ON / OFF
-python scripts/train_step1_pretrain.py ${BASE_ARGS} \
+python scripts/train_jepa_pretrain.py ${BASE_ARGS} \
   data.pretrain_mixed.augment.enabled=true \
   data.pretrain_mixed.augment.hflip_prob=0.5 \
   hydra.run.dir=outputs/ablations/aug_hflip_on_seed0
 
-python scripts/train_step1_pretrain.py ${BASE_ARGS} \
+python scripts/train_jepa_pretrain.py ${BASE_ARGS} \
   data.pretrain_mixed.augment.enabled=true \
   data.pretrain_mixed.augment.hflip_prob=0.0 \
   hydra.run.dir=outputs/ablations/aug_hflip_off_seed0
 
 # time flip ON / OFF
-python scripts/train_step1_pretrain.py ${BASE_ARGS} \
+python scripts/train_jepa_pretrain.py ${BASE_ARGS} \
   data.pretrain_mixed.augment.enabled=true \
   data.pretrain_mixed.augment.time_flip_prob=0.2 \
   hydra.run.dir=outputs/ablations/aug_timeflip_on_seed0
 
-python scripts/train_step1_pretrain.py ${BASE_ARGS} \
+python scripts/train_jepa_pretrain.py ${BASE_ARGS} \
   data.pretrain_mixed.augment.enabled=true \
   data.pretrain_mixed.augment.time_flip_prob=0.0 \
   hydra.run.dir=outputs/ablations/aug_timeflip_off_seed0
 
 # polarity flip ON / OFF
-python scripts/train_step1_pretrain.py ${BASE_ARGS} \
+python scripts/train_jepa_pretrain.py ${BASE_ARGS} \
   data.pretrain_mixed.augment.enabled=true \
   data.pretrain_mixed.augment.polarity_flip_prob=0.2 \
   hydra.run.dir=outputs/ablations/aug_polflip_on_seed0
 
-python scripts/train_step1_pretrain.py ${BASE_ARGS} \
+python scripts/train_jepa_pretrain.py ${BASE_ARGS} \
   data.pretrain_mixed.augment.enabled=true \
   data.pretrain_mixed.augment.polarity_flip_prob=0.0 \
   hydra.run.dir=outputs/ablations/aug_polflip_off_seed0
 
 # random resized crop ON / OFF（aspect固定）
-python scripts/train_step1_pretrain.py ${BASE_ARGS} \
+python scripts/train_jepa_pretrain.py ${BASE_ARGS} \
   data.pretrain_mixed.augment.enabled=true \
   data.pretrain_mixed.augment.random_resized_crop.enabled=true \
   data.pretrain_mixed.augment.random_resized_crop.prob=0.5 \
@@ -317,7 +317,7 @@ python scripts/train_step1_pretrain.py ${BASE_ARGS} \
   data.pretrain_mixed.augment.random_resized_crop.preserve_aspect=true \
   hydra.run.dir=outputs/ablations/aug_rrc_on_seed0
 
-python scripts/train_step1_pretrain.py ${BASE_ARGS} \
+python scripts/train_jepa_pretrain.py ${BASE_ARGS} \
   data.pretrain_mixed.augment.enabled=true \
   data.pretrain_mixed.augment.random_resized_crop.enabled=false \
   hydra.run.dir=outputs/ablations/aug_rrc_off_seed0
@@ -327,7 +327,7 @@ python scripts/train_step1_pretrain.py ${BASE_ARGS} \
 
 ```bash
 for N in 20000 40000 80000; do
-  python scripts/train_step1_pretrain.py ${BASE_ARGS} \
+  python scripts/train_jepa_pretrain.py ${BASE_ARGS} \
     data.pretrain_mixed.events_per_sample_min=${N} \
     data.pretrain_mixed.events_per_sample_max=${N} \
     hydra.run.dir=outputs/ablations/events_${N}_seed0
@@ -338,7 +338,7 @@ done
 
 ```bash
 source env/bin/activate
-python scripts/train_step1_pretrain.py \
+python scripts/train_jepa_pretrain.py \
   scheduler.enabled=true \
   scheduler.warmup_steps=1000 \
   scheduler.start_lr=1.0e-6 \
@@ -351,7 +351,7 @@ python scripts/train_step1_pretrain.py \
 
 ```bash
 source env/bin/activate
-torchrun --standalone --nproc_per_node=2 scripts/train_step1_pretrain.py \
+torchrun --standalone --nproc_per_node=2 scripts/train_jepa_pretrain.py \
   distributed.enabled=true \
   data.source=n_imagenet \
   data.n_imagenet.train_list=/absolute/path/to/train_list.txt
