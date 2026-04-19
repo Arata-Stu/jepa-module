@@ -159,6 +159,19 @@ class PretrainMixedEventsDataset(Dataset):
         min_event_rate_eps: float | None = None,
         activity_filter_sources: Sequence[str] | None = None,
         max_window_attempts: int = 4,
+        augment_enabled: bool = False,
+        hflip_prob: float = 0.0,
+        max_shift: int = 0,
+        time_flip_prob: float = 0.0,
+        polarity_flip_prob: float = 0.0,
+        rrc_enabled: bool = False,
+        rrc_prob: float = 0.0,
+        rrc_scale_min: float = 0.5,
+        rrc_scale_max: float = 1.0,
+        rrc_aspect_min: float = 0.75,
+        rrc_aspect_max: float = 4.0 / 3.0,
+        rrc_attempts: int = 10,
+        rrc_preserve_aspect: bool = False,
     ):
         super().__init__()
         self.events_per_sample_min = int(events_per_sample_min)
@@ -180,6 +193,19 @@ class PretrainMixedEventsDataset(Dataset):
         )
         self.activity_filter_sources = set(activity_filter_sources or [])
         self.max_window_attempts = max(1, int(max_window_attempts))
+        self.augment_enabled = bool(augment_enabled)
+        self.hflip_prob = float(hflip_prob)
+        self.max_shift = int(max_shift)
+        self.time_flip_prob = float(time_flip_prob)
+        self.polarity_flip_prob = float(polarity_flip_prob)
+        self.rrc_enabled = bool(rrc_enabled)
+        self.rrc_prob = float(rrc_prob)
+        self.rrc_scale_min = float(rrc_scale_min)
+        self.rrc_scale_max = float(rrc_scale_max)
+        self.rrc_aspect_min = float(rrc_aspect_min)
+        self.rrc_aspect_max = float(rrc_aspect_max)
+        self.rrc_attempts = int(rrc_attempts)
+        self.rrc_preserve_aspect = bool(rrc_preserve_aspect)
         self._max_read_retry = 8
         self._warn_budget = 20
         self._warned_read_errors = 0
@@ -201,6 +227,22 @@ class PretrainMixedEventsDataset(Dataset):
                 raise ValueError("window_duration_us_min must be >= 1")
             if self.window_duration_us_max is None or self.window_duration_us_max < self.window_duration_us_min:
                 raise ValueError("window_duration_us_max must be >= window_duration_us_min")
+        if not (0.0 <= self.hflip_prob <= 1.0):
+            raise ValueError("hflip_prob must be in [0, 1]")
+        if self.max_shift < 0:
+            raise ValueError("max_shift must be >= 0")
+        if not (0.0 <= self.time_flip_prob <= 1.0):
+            raise ValueError("time_flip_prob must be in [0, 1]")
+        if not (0.0 <= self.polarity_flip_prob <= 1.0):
+            raise ValueError("polarity_flip_prob must be in [0, 1]")
+        if not (0.0 <= self.rrc_prob <= 1.0):
+            raise ValueError("rrc_prob must be in [0, 1]")
+        if self.rrc_scale_min <= 0.0 or self.rrc_scale_max < self.rrc_scale_min:
+            raise ValueError("rrc_scale_min/rrc_scale_max must satisfy 0 < min <= max")
+        if self.rrc_aspect_min <= 0.0 or self.rrc_aspect_max < self.rrc_aspect_min:
+            raise ValueError("rrc_aspect_min/rrc_aspect_max must satisfy 0 < min <= max")
+        if self.rrc_attempts < 1:
+            raise ValueError("rrc_attempts must be >= 1")
 
         self.records = self._build_records(source_configs=source_configs)
         if len(self.records) == 0:
@@ -397,6 +439,160 @@ class PretrainMixedEventsDataset(Dataset):
             return True
         return source in self.activity_filter_sources
 
+    @staticmethod
+    def _sort_by_time(
+        x: np.ndarray,
+        y: np.ndarray,
+        p: np.ndarray,
+        t: np.ndarray,
+    ) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+        if t.size > 1 and np.any(t[1:] < t[:-1]):
+            order = np.argsort(t, kind="stable")
+            x = x[order]
+            y = y[order]
+            p = p[order]
+            t = t[order]
+        return x, y, p, t
+
+    @staticmethod
+    def _filter_valid_coords(
+        x: np.ndarray,
+        y: np.ndarray,
+        p: np.ndarray,
+        t: np.ndarray,
+        sensor_h: int,
+        sensor_w: int,
+    ) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+        if x.size == 0:
+            return x, y, p, t
+        mask = (
+            (x >= 0)
+            & (x < int(sensor_w))
+            & (y >= 0)
+            & (y < int(sensor_h))
+        )
+        return x[mask], y[mask], p[mask], t[mask]
+
+    def _apply_random_resized_crop(
+        self,
+        x: np.ndarray,
+        y: np.ndarray,
+        p: np.ndarray,
+        t: np.ndarray,
+        sensor_h: int,
+        sensor_w: int,
+    ) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+        if x.size == 0 or sensor_h < 2 or sensor_w < 2:
+            return x, y, p, t
+
+        area = float(sensor_h * sensor_w)
+        log_aspect_min = math.log(self.rrc_aspect_min)
+        log_aspect_max = math.log(self.rrc_aspect_max)
+        fixed_sensor_aspect = float(sensor_w) / float(sensor_h)
+
+        for _ in range(self.rrc_attempts):
+            target_area = random.uniform(self.rrc_scale_min, self.rrc_scale_max) * area
+            if self.rrc_preserve_aspect:
+                aspect_ratio = fixed_sensor_aspect
+            else:
+                aspect_ratio = math.exp(random.uniform(log_aspect_min, log_aspect_max))
+
+            crop_w = int(round(math.sqrt(target_area * aspect_ratio)))
+            crop_h = int(round(math.sqrt(target_area / aspect_ratio)))
+            if crop_w < 1 or crop_h < 1 or crop_w > sensor_w or crop_h > sensor_h:
+                continue
+
+            left = random.randint(0, sensor_w - crop_w)
+            top = random.randint(0, sensor_h - crop_h)
+
+            mask = (
+                (x >= left)
+                & (x < left + crop_w)
+                & (y >= top)
+                & (y < top + crop_h)
+            )
+            if not bool(np.any(mask)):
+                continue
+
+            x_local = x[mask] - left
+            y_local = y[mask] - top
+            p_local = p[mask]
+            t_local = t[mask]
+
+            if crop_w > 1:
+                x_new = np.floor(
+                    x_local.astype(np.float64) * float(sensor_w - 1) / float(crop_w - 1) + 0.5
+                ).astype(np.int64, copy=False)
+            else:
+                x_new = np.zeros_like(x_local, dtype=np.int64)
+
+            if crop_h > 1:
+                y_new = np.floor(
+                    y_local.astype(np.float64) * float(sensor_h - 1) / float(crop_h - 1) + 0.5
+                ).astype(np.int64, copy=False)
+            else:
+                y_new = np.zeros_like(y_local, dtype=np.int64)
+
+            np.clip(x_new, 0, sensor_w - 1, out=x_new)
+            np.clip(y_new, 0, sensor_h - 1, out=y_new)
+            return x_new, y_new, p_local, t_local
+
+        return x, y, p, t
+
+    def _apply_augmentations(
+        self,
+        x: np.ndarray,
+        y: np.ndarray,
+        p: np.ndarray,
+        t: np.ndarray,
+        sensor_h: int,
+        sensor_w: int,
+    ) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+        if (not self.augment_enabled) or x.size == 0:
+            return x, y, p, t
+
+        if self.rrc_enabled and self.rrc_prob > 0.0 and random.random() < self.rrc_prob:
+            x, y, p, t = self._apply_random_resized_crop(
+                x=x,
+                y=y,
+                p=p,
+                t=t,
+                sensor_h=sensor_h,
+                sensor_w=sensor_w,
+            )
+
+        if x.size == 0:
+            return x, y, p, t
+
+        if self.hflip_prob > 0.0 and random.random() < self.hflip_prob:
+            x = sensor_w - 1 - x
+
+        if self.max_shift > 0:
+            shift_x = random.randint(-self.max_shift, self.max_shift)
+            shift_y = random.randint(-self.max_shift, self.max_shift)
+            x = x + int(shift_x)
+            y = y + int(shift_y)
+
+        if self.polarity_flip_prob > 0.0 and random.random() < self.polarity_flip_prob:
+            p = 1 - p
+
+        if self.time_flip_prob > 0.0 and random.random() < self.time_flip_prob and t.size > 0:
+            if t.size > 1:
+                t_min = int(t[0])
+                t_max = int(t[-1])
+                t = (t_min + t_max - t[::-1]).astype(np.int64, copy=False)
+                x = x[::-1].copy()
+                y = y[::-1].copy()
+                p = p[::-1].copy()
+            else:
+                t = np.zeros_like(t, dtype=np.int64)
+
+        x = x.astype(np.int64, copy=False)
+        y = y.astype(np.int64, copy=False)
+        p = p.astype(np.int64, copy=False)
+        t = t.astype(np.int64, copy=False)
+        return x, y, p, t
+
     def _passes_activity_filter(
         self,
         record: _EventFileRecord,
@@ -461,24 +657,16 @@ class PretrainMixedEventsDataset(Dataset):
                     if t_offset != 0:
                         t = t + t_offset
 
-                    if t.size > 1 and np.any(t[1:] < t[:-1]):
-                        order = np.argsort(t, kind="stable")
-                        x = x[order]
-                        y = y[order]
-                        p = p[order]
-                        t = t[order]
+                    x, y, p, t = self._sort_by_time(x=x, y=y, p=p, t=t)
 
-                    if x.size > 0:
-                        mask = (
-                            (x >= 0)
-                            & (x < sensor_w)
-                            & (y >= 0)
-                            & (y < sensor_h)
-                        )
-                        x = x[mask]
-                        y = y[mask]
-                        p = p[mask]
-                        t = t[mask]
+                    x, y, p, t = self._filter_valid_coords(
+                        x=x,
+                        y=y,
+                        p=p,
+                        t=t,
+                        sensor_h=sensor_h,
+                        sensor_w=sensor_w,
+                    )
 
                     if self._passes_activity_filter(record=record, x=x, t=t):
                         accepted = True
@@ -490,27 +678,29 @@ class PretrainMixedEventsDataset(Dataset):
                     p = np.zeros((0,), dtype=np.int64)
                     t = np.zeros((0,), dtype=np.int64)
 
-        if t.size > 1 and np.any(t[1:] < t[:-1]):
-            order = np.argsort(t, kind="stable")
-            x = x[order]
-            y = y[order]
-            p = p[order]
-            t = t[order]
+        x, y, p, t = self._sort_by_time(x=x, y=y, p=p, t=t)
+
+        x, y, p, t = self._apply_augmentations(
+            x=x,
+            y=y,
+            p=p,
+            t=t,
+            sensor_h=sensor_h,
+            sensor_w=sensor_w,
+        )
+        x, y, p, t = self._sort_by_time(x=x, y=y, p=p, t=t)
 
         if self.time_normalize and t.size > 0:
             t = t - int(t[0])
 
-        if x.size > 0:
-            mask = (
-                (x >= 0)
-                & (x < sensor_w)
-                & (y >= 0)
-                & (y < sensor_h)
-            )
-            x = x[mask]
-            y = y[mask]
-            p = p[mask]
-            t = t[mask]
+        x, y, p, t = self._filter_valid_coords(
+            x=x,
+            y=y,
+            p=p,
+            t=t,
+            sensor_h=sensor_h,
+            sensor_w=sensor_w,
+        )
 
         return {
             "x": torch.from_numpy(x),
@@ -942,6 +1132,19 @@ class PretrainMixedVoxelBatchProvider:
         min_event_rate_eps: float | None = None,
         activity_filter_sources: Sequence[str] | None = None,
         max_window_attempts: int = 4,
+        augment_enabled: bool = False,
+        hflip_prob: float = 0.0,
+        max_shift: int = 0,
+        time_flip_prob: float = 0.0,
+        polarity_flip_prob: float = 0.0,
+        rrc_enabled: bool = False,
+        rrc_prob: float = 0.0,
+        rrc_scale_min: float = 0.5,
+        rrc_scale_max: float = 1.0,
+        rrc_aspect_min: float = 0.75,
+        rrc_aspect_max: float = 4.0 / 3.0,
+        rrc_attempts: int = 10,
+        rrc_preserve_aspect: bool = False,
         use_source_balancing: bool = True,
         epoch_size: int | None = None,
         sampler_seed: int = 42,
@@ -972,6 +1175,19 @@ class PretrainMixedVoxelBatchProvider:
             min_event_rate_eps=min_event_rate_eps,
             activity_filter_sources=activity_filter_sources,
             max_window_attempts=max_window_attempts,
+            augment_enabled=augment_enabled,
+            hflip_prob=hflip_prob,
+            max_shift=max_shift,
+            time_flip_prob=time_flip_prob,
+            polarity_flip_prob=polarity_flip_prob,
+            rrc_enabled=rrc_enabled,
+            rrc_prob=rrc_prob,
+            rrc_scale_min=rrc_scale_min,
+            rrc_scale_max=rrc_scale_max,
+            rrc_aspect_min=rrc_aspect_min,
+            rrc_aspect_max=rrc_aspect_max,
+            rrc_attempts=rrc_attempts,
+            rrc_preserve_aspect=rrc_preserve_aspect,
         )
         self._dataset_size = len(self.dataset)
         self._epoch_size = int(epoch_size) if epoch_size is not None else self._dataset_size

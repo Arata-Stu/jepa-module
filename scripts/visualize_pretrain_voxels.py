@@ -203,6 +203,21 @@ def _build_dataset_and_collator(cfg: DictConfig) -> tuple[PretrainMixedEventsDat
     window_duration_us_max = mixed_cfg.get("window_duration_us_max", None)
     duration_sources = tuple(str(s) for s in mixed_cfg.get("duration_sources", ["dsec", "gen4"]))
     prefer_ms_to_idx = bool(mixed_cfg.get("prefer_ms_to_idx", True))
+    augment_cfg = mixed_cfg.get("augment", {})
+    rrc_cfg = augment_cfg.get("random_resized_crop", {})
+    augment_enabled = bool(augment_cfg.get("enabled", False))
+    hflip_prob = float(augment_cfg.get("hflip_prob", 0.0))
+    max_shift = int(augment_cfg.get("max_shift", 0))
+    time_flip_prob = float(augment_cfg.get("time_flip_prob", 0.0))
+    polarity_flip_prob = float(augment_cfg.get("polarity_flip_prob", 0.0))
+    rrc_enabled = bool(rrc_cfg.get("enabled", False))
+    rrc_prob = float(rrc_cfg.get("prob", 0.0))
+    rrc_scale_min = float(rrc_cfg.get("scale_min", 0.5))
+    rrc_scale_max = float(rrc_cfg.get("scale_max", 1.0))
+    rrc_aspect_min = float(rrc_cfg.get("aspect_min", 0.75))
+    rrc_aspect_max = float(rrc_cfg.get("aspect_max", 4.0 / 3.0))
+    rrc_attempts = int(rrc_cfg.get("attempts", 10))
+    rrc_preserve_aspect = bool(rrc_cfg.get("preserve_aspect", False))
 
     dataset = PretrainMixedEventsDataset(
         source_configs=source_configs,
@@ -221,6 +236,19 @@ def _build_dataset_and_collator(cfg: DictConfig) -> tuple[PretrainMixedEventsDat
             str(s) for s in mixed_cfg.get("activity_filter_sources", ["gen4"])
         ),
         max_window_attempts=int(mixed_cfg.get("max_window_attempts", 4)),
+        augment_enabled=augment_enabled,
+        hflip_prob=hflip_prob,
+        max_shift=max_shift,
+        time_flip_prob=time_flip_prob,
+        polarity_flip_prob=polarity_flip_prob,
+        rrc_enabled=rrc_enabled,
+        rrc_prob=rrc_prob,
+        rrc_scale_min=rrc_scale_min,
+        rrc_scale_max=rrc_scale_max,
+        rrc_aspect_min=rrc_aspect_min,
+        rrc_aspect_max=rrc_aspect_max,
+        rrc_attempts=rrc_attempts,
+        rrc_preserve_aspect=rrc_preserve_aspect,
         drop_empty=True,
     )
 

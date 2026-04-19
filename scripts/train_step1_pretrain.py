@@ -500,6 +500,21 @@ def build_batch_provider(
             str(s) for s in mixed_cfg.get("activity_filter_sources", ["gen4"])
         )
         max_window_attempts = int(mixed_cfg.get("max_window_attempts", 4))
+        augment_cfg = mixed_cfg.get("augment", {})
+        rrc_cfg = augment_cfg.get("random_resized_crop", {})
+        augment_enabled = bool(augment_cfg.get("enabled", False))
+        hflip_prob = float(augment_cfg.get("hflip_prob", 0.0))
+        max_shift = int(augment_cfg.get("max_shift", 0))
+        time_flip_prob = float(augment_cfg.get("time_flip_prob", 0.0))
+        polarity_flip_prob = float(augment_cfg.get("polarity_flip_prob", 0.0))
+        rrc_enabled = bool(rrc_cfg.get("enabled", False))
+        rrc_prob = float(rrc_cfg.get("prob", 0.0))
+        rrc_scale_min = float(rrc_cfg.get("scale_min", 0.5))
+        rrc_scale_max = float(rrc_cfg.get("scale_max", 1.0))
+        rrc_aspect_min = float(rrc_cfg.get("aspect_min", 0.75))
+        rrc_aspect_max = float(rrc_cfg.get("aspect_max", 4.0 / 3.0))
+        rrc_attempts = int(rrc_cfg.get("attempts", 10))
+        rrc_preserve_aspect = bool(rrc_cfg.get("preserve_aspect", False))
         debug_index_check = bool(mixed_cfg.get("debug_index_check", False))
         debug_raise_on_oob = bool(mixed_cfg.get("debug_raise_on_oob", False))
         debug_log_limit = int(mixed_cfg.get("debug_log_limit", 20))
@@ -527,6 +542,19 @@ def build_batch_provider(
             min_event_rate_eps=min_event_rate_eps,
             activity_filter_sources=activity_filter_sources,
             max_window_attempts=max_window_attempts,
+            augment_enabled=augment_enabled,
+            hflip_prob=hflip_prob,
+            max_shift=max_shift,
+            time_flip_prob=time_flip_prob,
+            polarity_flip_prob=polarity_flip_prob,
+            rrc_enabled=rrc_enabled,
+            rrc_prob=rrc_prob,
+            rrc_scale_min=rrc_scale_min,
+            rrc_scale_max=rrc_scale_max,
+            rrc_aspect_min=rrc_aspect_min,
+            rrc_aspect_max=rrc_aspect_max,
+            rrc_attempts=rrc_attempts,
+            rrc_preserve_aspect=rrc_preserve_aspect,
             use_source_balancing=bool(mixed_cfg.use_source_balancing),
             epoch_size=mixed_cfg.epoch_size,
             sampler_seed=int(mixed_cfg.sampler_seed),
@@ -1024,6 +1052,42 @@ def maybe_validate_cfg(cfg: DictConfig) -> None:
             raise ValueError("data.pretrain_mixed.epoch_size must be >= 1 when set")
         if int(mixed_cfg.get("debug_log_limit", 20)) < 1:
             raise ValueError("data.pretrain_mixed.debug_log_limit must be >= 1")
+        augment_cfg = mixed_cfg.get("augment", {})
+        if not (0.0 <= float(augment_cfg.get("hflip_prob", 0.0)) <= 1.0):
+            raise ValueError("data.pretrain_mixed.augment.hflip_prob must be in [0, 1]")
+        if int(augment_cfg.get("max_shift", 0)) < 0:
+            raise ValueError("data.pretrain_mixed.augment.max_shift must be >= 0")
+        if not (0.0 <= float(augment_cfg.get("time_flip_prob", 0.0)) <= 1.0):
+            raise ValueError("data.pretrain_mixed.augment.time_flip_prob must be in [0, 1]")
+        if not (0.0 <= float(augment_cfg.get("polarity_flip_prob", 0.0)) <= 1.0):
+            raise ValueError("data.pretrain_mixed.augment.polarity_flip_prob must be in [0, 1]")
+        rrc_cfg = augment_cfg.get("random_resized_crop", {})
+        if not (0.0 <= float(rrc_cfg.get("prob", 0.0)) <= 1.0):
+            raise ValueError(
+                "data.pretrain_mixed.augment.random_resized_crop.prob must be in [0, 1]"
+            )
+        rrc_scale_min = float(rrc_cfg.get("scale_min", 0.5))
+        rrc_scale_max = float(rrc_cfg.get("scale_max", 1.0))
+        if rrc_scale_min <= 0.0 or rrc_scale_max < rrc_scale_min:
+            raise ValueError(
+                "data.pretrain_mixed.augment.random_resized_crop.scale_min/scale_max "
+                "must satisfy 0 < min <= max"
+            )
+        if rrc_scale_max > 1.0:
+            raise ValueError(
+                "data.pretrain_mixed.augment.random_resized_crop.scale_max must be <= 1.0"
+            )
+        rrc_aspect_min = float(rrc_cfg.get("aspect_min", 0.75))
+        rrc_aspect_max = float(rrc_cfg.get("aspect_max", 4.0 / 3.0))
+        if rrc_aspect_min <= 0.0 or rrc_aspect_max < rrc_aspect_min:
+            raise ValueError(
+                "data.pretrain_mixed.augment.random_resized_crop.aspect_min/aspect_max "
+                "must satisfy 0 < min <= max"
+            )
+        if int(rrc_cfg.get("attempts", 10)) < 1:
+            raise ValueError(
+                "data.pretrain_mixed.augment.random_resized_crop.attempts must be >= 1"
+            )
 
         active_sources: list[str] = []
         allowed_source_names = {"dsec", "gen4", "n_imagenet"}

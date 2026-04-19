@@ -54,8 +54,8 @@ aspect_max: 2.0
 num_pred_blocks: 1
 max_context_frames_ratio: 1.0
 
-print_every: 10
-save_every: 100
+print_every: 1000
+save_every: 10000
 out_dir: ${hydra:runtime.output_dir}/checkpoints
 log_dir: ${hydra:runtime.output_dir}/logs
 metrics_file: ${hydra:runtime.output_dir}/logs/train_metrics.csv
@@ -89,7 +89,7 @@ distributed:
 
 data:
   source: pretrain_mixed  # pretraining default
-  num_workers: 4
+  num_workers: 8
   pin_memory: false
   drop_last: true
   persistent_workers: true
@@ -119,6 +119,22 @@ data:
     use_source_balancing: true
     epoch_size: null
     sampler_seed: 42
+
+    augment:
+      enabled: false
+      hflip_prob: 0.5
+      max_shift: 8
+      time_flip_prob: 0.0
+      polarity_flip_prob: 0.0
+      random_resized_crop:
+        enabled: false
+        prob: 0.5
+        scale_min: 0.8
+        scale_max: 1.0
+        aspect_min: 0.75
+        aspect_max: 1.3333333333333333
+        attempts: 10
+        preserve_aspect: true
 
     # Common canvas before voxel-grid rescale.
     # 1MPX (320x180) is centered into this canvas by padding when center_pad_to_canvas=true.

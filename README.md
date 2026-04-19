@@ -124,7 +124,17 @@ python scripts/train_step1_pretrain.py \
   data.pretrain_mixed.duration_sources=[dsec,gen4] \
   data.pretrain_mixed.weights.dsec=1.0 \
   data.pretrain_mixed.weights.gen4=1.0 \
-  data.pretrain_mixed.weights.n_imagenet=1.0
+  data.pretrain_mixed.weights.n_imagenet=1.0 \
+  data.pretrain_mixed.augment.enabled=true \
+  data.pretrain_mixed.augment.hflip_prob=0.5 \
+  data.pretrain_mixed.augment.max_shift=8 \
+  data.pretrain_mixed.augment.time_flip_prob=0.2 \
+  data.pretrain_mixed.augment.polarity_flip_prob=0.2 \
+  data.pretrain_mixed.augment.random_resized_crop.enabled=true \
+  data.pretrain_mixed.augment.random_resized_crop.prob=0.5 \
+  data.pretrain_mixed.augment.random_resized_crop.scale_min=0.8 \
+  data.pretrain_mixed.augment.random_resized_crop.scale_max=1.0 \
+  data.pretrain_mixed.augment.random_resized_crop.preserve_aspect=true
 ```
 
 - `weights` でデータセット混合比率を制御できます。
@@ -134,6 +144,9 @@ python scripts/train_step1_pretrain.py \
 - `events_per_sample_*` はイベント数ベースの可変切り出しです。
 - 停止シーン対策には `min_events_in_window` と `min_event_rate_eps`（events/sec）を使えます。
   条件を満たさない窓は同一ファイル内で `max_window_attempts` 回まで再サンプリングします。
+- `data.pretrain_mixed.augment.enabled=true` でイベント段階の拡張を有効化できます。
+  `hflip/max_shift/time_flip/polarity_flip` と `random_resized_crop.*`（ランダム矩形crop→座標リサイズ）が使えます。
+  `random_resized_crop.preserve_aspect=true` でセンサ比を維持した等方スケーリングになります。
 - `t_bins=10 + temporal_mix.short_t=1` で 10bin/1bin を学習中に混在できます。
 - H5読み込み失敗時は別サンプルへ自動リトライし、worker が落ちにくい挙動にしています。
 - 範囲外 index の追跡は `data.pretrain_mixed.debug_index_check=true` で有効化できます。
@@ -164,6 +177,157 @@ source env/bin/activate
 python scripts/train_step1_pretrain.py collapse_strategy=ema_stopgrad steps=200
 python scripts/train_step1_pretrain.py collapse_strategy=vicreg steps=200 vicreg_std_weight=0.1 vicreg_cov_weight=0.01
 python scripts/train_step1_pretrain.py collapse_strategy=sigreg steps=200 sigreg_weight=0.01
+```
+
+## Ablation 実行コマンド集
+
+公平比較のため、まず以下を固定するのがおすすめです。
+
+- `seed`
+- `steps`
+- `batch_size`
+- `lr`, `weight_decay`, scheduler 設定
+- `height/width/t_bins/patch_size/tubelet_size`
+- 下流評価プロトコル（同じ checkpoint 選択ルール）
+
+### 共通ベース（pretrain_mixed）
+
+```bash
+source env/bin/activate
+
+BASE_ARGS="\
+data.source=pretrain_mixed \
+eval.enabled=false \
+steps=50000 \
+seed=0 \
+batch_size=8 \
+t_bins=10 \
+temporal_mix.enabled=true \
+temporal_mix.short_t=1 \
+temporal_mix.image_prob=0.5 \
+temporal_mix.short_mode=sum"
+```
+
+### 1. 学習手法（JEPA / MEM / MAE）
+
+JEPA（このリポジトリ本体）
+
+```bash
+python scripts/train_step1_pretrain.py ${BASE_ARGS} \
+  collapse_strategy=ema_stopgrad \
+  hydra.run.dir=outputs/ablations/method_jepa_seed0
+```
+
+MEM / MAE（`tmp/mem` 実装）
+
+このリポジトリの `scripts/train_step1_pretrain.py` は JEPA 系のみ実装です。  
+`MEM/MAE` は `tmp/mem` の実装を使って比較してください。
+
+```bash
+cd tmp/mem/mem
+
+# MEM: MAEフラグを0、VAE checkpointを指定
+torchrun --standalone --nproc_per_node=1 run_mem_pretraining.py \
+  --config ../configs/nimagenet.conf \
+  --expweek 2026-04 \
+  --expname mem_seed0 \
+  --model pt_vit \
+  --MAE 0 \
+  --data_path /absolute/path/to/processed_dataset \
+  --discrete_vae_weight_path /absolute/path/to/vae_checkpoint.pth \
+  --output_dir ../../../outputs/ablations/method_mem_seed0 \
+  --log_dir ../../../outputs/ablations/method_mem_seed0/tb
+
+# MAE: MAEフラグを1（離散VAEは不要）
+torchrun --standalone --nproc_per_node=1 run_mem_pretraining.py \
+  --config ../configs/nimagenet.conf \
+  --expweek 2026-04 \
+  --expname mae_seed0 \
+  --MAE 1 \
+  --data_path /absolute/path/to/processed_dataset \
+  --output_dir ../../../outputs/ablations/method_mae_seed0 \
+  --log_dir ../../../outputs/ablations/method_mae_seed0/tb
+```
+
+### 2. 勾配更新方式（JEPA 内）
+
+```bash
+python scripts/train_step1_pretrain.py ${BASE_ARGS} \
+  collapse_strategy=ema_stopgrad \
+  hydra.run.dir=outputs/ablations/collapse_ema_stopgrad_seed0
+
+python scripts/train_step1_pretrain.py ${BASE_ARGS} \
+  collapse_strategy=vicreg \
+  vicreg_std_weight=0.1 vicreg_cov_weight=0.01 \
+  hydra.run.dir=outputs/ablations/collapse_vicreg_seed0
+
+python scripts/train_step1_pretrain.py ${BASE_ARGS} \
+  collapse_strategy=sigreg \
+  sigreg_weight=0.01 \
+  hydra.run.dir=outputs/ablations/collapse_sigreg_seed0
+```
+
+### 3. 前処理（true / false）
+
+```bash
+# hflip ON / OFF
+python scripts/train_step1_pretrain.py ${BASE_ARGS} \
+  data.pretrain_mixed.augment.enabled=true \
+  data.pretrain_mixed.augment.hflip_prob=0.5 \
+  hydra.run.dir=outputs/ablations/aug_hflip_on_seed0
+
+python scripts/train_step1_pretrain.py ${BASE_ARGS} \
+  data.pretrain_mixed.augment.enabled=true \
+  data.pretrain_mixed.augment.hflip_prob=0.0 \
+  hydra.run.dir=outputs/ablations/aug_hflip_off_seed0
+
+# time flip ON / OFF
+python scripts/train_step1_pretrain.py ${BASE_ARGS} \
+  data.pretrain_mixed.augment.enabled=true \
+  data.pretrain_mixed.augment.time_flip_prob=0.2 \
+  hydra.run.dir=outputs/ablations/aug_timeflip_on_seed0
+
+python scripts/train_step1_pretrain.py ${BASE_ARGS} \
+  data.pretrain_mixed.augment.enabled=true \
+  data.pretrain_mixed.augment.time_flip_prob=0.0 \
+  hydra.run.dir=outputs/ablations/aug_timeflip_off_seed0
+
+# polarity flip ON / OFF
+python scripts/train_step1_pretrain.py ${BASE_ARGS} \
+  data.pretrain_mixed.augment.enabled=true \
+  data.pretrain_mixed.augment.polarity_flip_prob=0.2 \
+  hydra.run.dir=outputs/ablations/aug_polflip_on_seed0
+
+python scripts/train_step1_pretrain.py ${BASE_ARGS} \
+  data.pretrain_mixed.augment.enabled=true \
+  data.pretrain_mixed.augment.polarity_flip_prob=0.0 \
+  hydra.run.dir=outputs/ablations/aug_polflip_off_seed0
+
+# random resized crop ON / OFF（aspect固定）
+python scripts/train_step1_pretrain.py ${BASE_ARGS} \
+  data.pretrain_mixed.augment.enabled=true \
+  data.pretrain_mixed.augment.random_resized_crop.enabled=true \
+  data.pretrain_mixed.augment.random_resized_crop.prob=0.5 \
+  data.pretrain_mixed.augment.random_resized_crop.scale_min=0.8 \
+  data.pretrain_mixed.augment.random_resized_crop.scale_max=1.0 \
+  data.pretrain_mixed.augment.random_resized_crop.preserve_aspect=true \
+  hydra.run.dir=outputs/ablations/aug_rrc_on_seed0
+
+python scripts/train_step1_pretrain.py ${BASE_ARGS} \
+  data.pretrain_mixed.augment.enabled=true \
+  data.pretrain_mixed.augment.random_resized_crop.enabled=false \
+  hydra.run.dir=outputs/ablations/aug_rrc_off_seed0
+```
+
+### 4. 蓄積イベント数（events_per_sample）sweep
+
+```bash
+for N in 20000 40000 80000; do
+  python scripts/train_step1_pretrain.py ${BASE_ARGS} \
+    data.pretrain_mixed.events_per_sample_min=${N} \
+    data.pretrain_mixed.events_per_sample_max=${N} \
+    hydra.run.dir=outputs/ablations/events_${N}_seed0
+done
 ```
 
 ## Scheduler（Warmup + Cosine）
