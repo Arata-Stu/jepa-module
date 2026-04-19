@@ -68,6 +68,10 @@ source env/bin/activate
 python scripts/train_step1_pretrain.py
 ```
 
+- デフォルトでは `data.pretrain_mixed.augment.enabled=true`（RRC含む）と
+  `scheduler.enabled=true` で実行されます。
+- 無効化したい場合は `data.pretrain_mixed.augment.enabled=false scheduler.enabled=false` を指定してください。
+
 ### N-ImageNet
 
 ```bash
