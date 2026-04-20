@@ -74,6 +74,9 @@ data:
 
 logging:
   print_every: 5
+  tqdm:
+    enabled: true
+    leave: false
   tensorboard:
     enabled: true
     subdir: tensorboard

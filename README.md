@@ -129,6 +129,7 @@ python scripts/train_n_imagenet_linear_probe.py \
 - 学習対象は線形 head のみで、encoder は checkpoint 読み込み後に凍結されます。
 - `pretrained.encoder_key=teacher_encoder`（既定）で teacher を優先し、無ければ `encoder` へフォールバックします。
 - `model.*`（`height/width/t_bins/patch_size/tubelet_size/temporal_mix.*`）は pretrain 時と一致させてください。
+- 進捗バーは `logging.tqdm.enabled=true`（既定）で有効、無効化は `logging.tqdm.enabled=false`。
 
 ### DSEC
 

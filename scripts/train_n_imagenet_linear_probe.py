@@ -23,6 +23,10 @@ import torch.nn as nn
 from hydra.utils import to_absolute_path
 from omegaconf import DictConfig, OmegaConf
 from torch.utils.data import DataLoader
+try:
+    from tqdm.auto import tqdm
+except ModuleNotFoundError:
+    tqdm = None  # type: ignore[assignment]
 
 try:
     from torch.utils.tensorboard import SummaryWriter
@@ -58,6 +62,7 @@ MODEL_SPECS: Dict[str, Dict[str, object]] = {
 }
 
 FEATURE_POOL_CHOICES = {"mean", "max", "mean_max"}
+_TQDM_MISSING_WARNED = False
 
 
 def set_seed(seed: int) -> None:
@@ -313,6 +318,8 @@ def build_lr_scheduler(
 def run_epoch(
     *,
     split: str,
+    epoch: int,
+    total_epochs: int,
     loader: DataLoader,
     encoder: nn.Module,
     head: nn.Module,
@@ -321,8 +328,11 @@ def run_epoch(
     scheduler: torch.optim.lr_scheduler.LambdaLR | None,
     feature_pooling: str,
     grad_clip: float,
+    show_progress: bool,
+    tqdm_leave: bool,
     device: torch.device,
 ) -> dict[str, float]:
+    global _TQDM_MISSING_WARNED
     training = split == "train"
     head.train(training)
 
@@ -331,7 +341,23 @@ def run_epoch(
     correct_top1 = 0.0
     correct_top5 = 0.0
 
-    for batch in loader:
+    iterator: Any = loader
+    if show_progress and tqdm is not None:
+        iterator = tqdm(
+            loader,
+            total=len(loader),
+            leave=tqdm_leave,
+            dynamic_ncols=True,
+            desc=f"{split} {epoch:03d}/{total_epochs:03d}",
+        )
+    elif show_progress and tqdm is None and not _TQDM_MISSING_WARNED:
+        print(
+            "[WARN] tqdm is enabled but not installed. "
+            "Install with `pip install tqdm` to display progress bars."
+        )
+        _TQDM_MISSING_WARNED = True
+
+    for batch in iterator:
         inputs = batch["inputs"].to(device, non_blocking=True)
         labels = batch["labels"].to(device, non_blocking=True)
         if labels.numel() == 0:
@@ -366,6 +392,16 @@ def run_epoch(
         total_samples += batch_size
         correct_top1 += _topk_correct(logits, labels, k=1)
         correct_top5 += _topk_correct(logits, labels, k=5)
+
+        if show_progress and tqdm is not None:
+            avg_loss = total_loss / total_samples
+            avg_top1 = correct_top1 / total_samples
+            avg_top5 = correct_top5 / total_samples
+            iterator.set_postfix(
+                loss=f"{avg_loss:.4f}",
+                top1=f"{avg_top1:.3f}",
+                top5=f"{avg_top5:.3f}",
+            )
 
     if total_samples <= 0:
         return {
@@ -523,6 +559,8 @@ def main(cfg: DictConfig) -> None:
         for epoch in range(1, int(cfg.epochs) + 1):
             train_stats = run_epoch(
                 split="train",
+                epoch=epoch,
+                total_epochs=int(cfg.epochs),
                 loader=train_loader,
                 encoder=encoder,
                 head=head,
@@ -531,6 +569,8 @@ def main(cfg: DictConfig) -> None:
                 scheduler=scheduler,
                 feature_pooling=feature_pooling,
                 grad_clip=float(cfg.optimizer.grad_clip),
+                show_progress=bool(cfg.logging.tqdm.enabled),
+                tqdm_leave=bool(cfg.logging.tqdm.leave),
                 device=device,
             )
             current_lr = float(optimizer.param_groups[0]["lr"])
@@ -550,6 +590,8 @@ def main(cfg: DictConfig) -> None:
             if do_eval:
                 val_stats = run_epoch(
                     split="val",
+                    epoch=epoch,
+                    total_epochs=int(cfg.epochs),
                     loader=val_loader,
                     encoder=encoder,
                     head=head,
@@ -558,6 +600,8 @@ def main(cfg: DictConfig) -> None:
                     scheduler=None,
                     feature_pooling=feature_pooling,
                     grad_clip=0.0,
+                    show_progress=bool(cfg.logging.tqdm.enabled),
+                    tqdm_leave=bool(cfg.logging.tqdm.leave),
                     device=device,
                 )
                 writer.writerow(
