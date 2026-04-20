@@ -266,6 +266,15 @@ def _topk_correct(logits: torch.Tensor, labels: torch.Tensor, k: int) -> float:
     return float(correct.any(dim=1).sum().item())
 
 
+def _format_metric(x: float) -> str:
+    if not math.isfinite(x):
+        return str(x)
+    ax = abs(x)
+    if ax >= 1.0e-3:
+        return f"{x:.4f}"
+    return f"{x:.3e}"
+
+
 def _pool_features(tokens: torch.Tensor, mode: str) -> torch.Tensor:
     if tokens.ndim != 3:
         raise ValueError(f"Expected tokens to be [B, N, D], got shape={tuple(tokens.shape)}")
@@ -398,9 +407,9 @@ def run_epoch(
             avg_top1 = correct_top1 / total_samples
             avg_top5 = correct_top5 / total_samples
             iterator.set_postfix(
-                loss=f"{avg_loss:.4f}",
-                top1=f"{avg_top1:.3f}",
-                top5=f"{avg_top5:.3f}",
+                loss=_format_metric(avg_loss),
+                top1=_format_metric(avg_top1),
+                top5=_format_metric(avg_top5),
             )
 
     if total_samples <= 0:
@@ -488,6 +497,15 @@ def main(cfg: DictConfig) -> None:
     feature_pooling = str(cfg.model.feature_pooling)
     head_in_dim = embed_dim * (2 if feature_pooling == "mean_max" else 1)
     inferred_num_classes = len(train_dataset.class_names)
+    if inferred_num_classes <= 1:
+        raise ValueError(
+            "Detected <=1 class from train_list. "
+            "This usually means label extraction failed (class is inferred from parent "
+            "directory name) or the list contains only one class. "
+            f"inferred_num_classes={inferred_num_classes}. "
+            "Please verify train_list paths include class directories."
+        )
+
     num_classes = (
         int(cfg.head.num_classes)
         if cfg.head.num_classes is not None
