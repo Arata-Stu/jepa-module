@@ -110,6 +110,26 @@ python scripts/train_jepa_pretrain.py \
   data.num_workers=4
 ```
 
+### N-ImageNet Linear Probe（下流分類・凍結エンコーダ）
+
+```bash
+source env/bin/activate
+python scripts/train_n_imagenet_linear_probe.py \
+  pretrained.checkpoint=/absolute/path/to/pretrain/step_100000.pt \
+  model.model_size=tiny \
+  model.height=240 model.width=320 \
+  model.t_bins=10 model.patch_size=16 model.tubelet_size=2 \
+  data.n_imagenet.train_list=/absolute/path/to/train_list.txt \
+  data.n_imagenet.val_list=/absolute/path/to/val_list.txt \
+  data.n_imagenet.root_dir=/absolute/path/to/N_Imagenet \
+  batch_size=64
+```
+
+- デフォルトで `data.n_imagenet.force_full_event_input=true` のため、1ファイル内イベントを全量入力します（slice 無効）。
+- 学習対象は線形 head のみで、encoder は checkpoint 読み込み後に凍結されます。
+- `pretrained.encoder_key=teacher_encoder`（既定）で teacher を優先し、無ければ `encoder` へフォールバックします。
+- `model.*`（`height/width/t_bins/patch_size/tubelet_size/temporal_mix.*`）は pretrain 時と一致させてください。
+
 ### DSEC
 
 ```bash

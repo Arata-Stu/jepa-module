@@ -127,6 +127,7 @@ class NImageNetEventsDataset(Dataset):
         root_dir: str | None = None,
         limit_samples: int | None = None,
         limit_classes: int | None = None,
+        class_names: list[str] | tuple[str, ...] | None = None,
         sensor_height: int = 480,
         sensor_width: int = 640,
         slice_enabled: bool = False,
@@ -164,13 +165,22 @@ class NImageNetEventsDataset(Dataset):
 
         self.sample_paths = self._read_list_file(self.list_file)
 
-        class_names = sorted({p.parent.name for p in self.sample_paths})
+        if class_names is None:
+            resolved_class_names = sorted({p.parent.name for p in self.sample_paths})
+        else:
+            resolved_class_names = [str(name) for name in class_names]
+            if len(resolved_class_names) == 0:
+                raise ValueError("class_names must not be empty when provided")
+            if len(set(resolved_class_names)) != len(resolved_class_names):
+                raise ValueError("class_names contains duplicated class names")
+
         if limit_classes is not None:
-            class_names = class_names[:limit_classes]
-            allowed = set(class_names)
+            resolved_class_names = resolved_class_names[:limit_classes]
+            allowed = set(resolved_class_names)
             self.sample_paths = [p for p in self.sample_paths if p.parent.name in allowed]
 
-        self.label_map = {name: idx for idx, name in enumerate(class_names)}
+        self.class_names = list(resolved_class_names)
+        self.label_map = {name: idx for idx, name in enumerate(self.class_names)}
         if limit_samples is not None:
             self.sample_paths = self.sample_paths[:limit_samples]
 

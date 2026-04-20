@@ -1,0 +1,90 @@
+# Hydra config for N-ImageNet linear probe (frozen encoder + trainable linear head)
+
+device: auto
+seed: 42
+epochs: 100
+batch_size: 64
+
+normalize_voxel: true
+
+optimizer:
+  lr: 1.0e-3
+  weight_decay: 0.0
+  grad_clip: 1.0
+
+scheduler:
+  enabled: true
+  warmup_epochs: 5
+
+model:
+  model_size: tiny  # tiny | small | base | large (must match pretrain encoder)
+  height: 240
+  width: 320
+  t_bins: 10
+  patch_size: 16
+  tubelet_size: 2
+  feature_pooling: mean  # mean | max | mean_max
+  temporal_mix:
+    enabled: true
+    short_t: 1
+
+pretrained:
+  checkpoint: null
+  encoder_key: teacher_encoder
+  fallback_to_encoder: true
+  strict: true
+
+head:
+  num_classes: null  # null -> infer from train list class set
+
+data:
+  num_workers: 8
+  pin_memory: false
+  drop_last_train: true
+  persistent_workers: true
+  prefetch_factor: 2
+
+  n_imagenet:
+    train_list: null
+    val_list: null
+    root_dir: null
+    compressed: true
+    time_scale: 1000000.0
+    limit_samples_train: null
+    limit_samples_val: null
+    limit_classes: null
+    sensor_height: 240
+    sensor_width: 320
+    rescale_to_voxel_grid: true
+
+    # If true, each sample uses all events in one file (no slicing).
+    force_full_event_input: true
+
+    slice:
+      enabled: false
+      mode: random
+      start: null
+      end: null
+      length: 30000
+
+    augment:
+      enabled: false
+      hflip_prob: 0.5
+      max_shift: 8
+
+logging:
+  print_every: 5
+  tensorboard:
+    enabled: true
+    subdir: tensorboard
+
+eval:
+  every_epochs: 1
+
+out_dir: ${hydra:runtime.output_dir}/checkpoints
+log_dir: ${hydra:runtime.output_dir}/logs
+metrics_file: ${hydra:runtime.output_dir}/logs/linear_probe_metrics.csv
+
+hydra:
+  run:
+    dir: ./outputs/linear_probe_n_imagenet/${now:%Y-%m-%d}/${now:%H-%M-%S}
