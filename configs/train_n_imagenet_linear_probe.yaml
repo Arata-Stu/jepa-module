@@ -53,6 +53,8 @@ data:
     limit_samples_train: null
     limit_samples_val: null
     limit_classes: null
+    infer_class_from_h5_attr: true
+    infer_class_from_filename_prefix: true
     sensor_height: 240
     sensor_width: 320
     rescale_to_voxel_grid: true

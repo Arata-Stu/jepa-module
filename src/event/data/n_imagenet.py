@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import random
+import re
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -117,6 +119,70 @@ def _load_n_imagenet_events(
     raise ValueError(f"Unsupported event file extension for N-ImageNet: {event_path}")
 
 
+@dataclass
+class _NImageNetSample:
+    path: Path
+    label_name: str
+
+
+_SYNSET_RE = re.compile(r"^n\d{8}$")
+_SYNSET_PREFIX_RE = re.compile(r"^(n\d{8})(?:[_-].*)?$")
+
+
+def _is_int_like(value: str) -> bool:
+    v = value.strip()
+    if len(v) == 0:
+        return False
+    if v[0] in {"+", "-"}:
+        return v[1:].isdigit()
+    return v.isdigit()
+
+
+def _sort_class_names(class_names: set[str]) -> list[str]:
+    values = [str(v) for v in class_names]
+    if len(values) == 0:
+        return values
+    if all(_is_int_like(v) for v in values):
+        return sorted(values, key=lambda x: int(x))
+    return sorted(values)
+
+
+def _read_h5_class_synset(path: Path) -> str | None:
+    suffix = path.suffix.lower()
+    if suffix not in {".h5", ".hdf5"}:
+        return None
+
+    try:
+        with _open_h5_for_read(path) as h5f:
+            attr = h5f.attrs.get("class_synset", None)
+            if attr is None:
+                events_group = h5f.get("events", None)
+                if events_group is not None:
+                    attr = events_group.attrs.get("class_synset", None)
+            if attr is None:
+                return None
+            if isinstance(attr, bytes):
+                value = attr.decode("utf-8", errors="ignore")
+            else:
+                value = str(attr)
+            value = value.strip()
+            return value if len(value) > 0 else None
+    except Exception:
+        return None
+
+
+def _infer_label_from_path(path: Path) -> str | None:
+    parent = path.parent.name.strip()
+    if _SYNSET_RE.match(parent) is not None:
+        return parent
+
+    stem = path.stem.strip()
+    m = _SYNSET_PREFIX_RE.match(stem)
+    if m is not None:
+        return m.group(1)
+    return None
+
+
 class NImageNetEventsDataset(Dataset):
     def __init__(
         self,
@@ -128,6 +194,8 @@ class NImageNetEventsDataset(Dataset):
         limit_samples: int | None = None,
         limit_classes: int | None = None,
         class_names: list[str] | tuple[str, ...] | None = None,
+        infer_class_from_h5_attr: bool = False,
+        infer_class_from_filename_prefix: bool = False,
         sensor_height: int = 480,
         sensor_width: int = 640,
         slice_enabled: bool = False,
@@ -145,6 +213,8 @@ class NImageNetEventsDataset(Dataset):
         self.compressed = compressed
         self.time_scale = time_scale
         self.root_dir = Path(root_dir) if root_dir else None
+        self.infer_class_from_h5_attr = bool(infer_class_from_h5_attr)
+        self.infer_class_from_filename_prefix = bool(infer_class_from_filename_prefix)
         self.sensor_height = sensor_height
         self.sensor_width = sensor_width
 
@@ -163,10 +233,14 @@ class NImageNetEventsDataset(Dataset):
         if not self.list_file.exists():
             raise FileNotFoundError(f"list file not found: {self.list_file}")
 
-        self.sample_paths = self._read_list_file(self.list_file)
+        self.samples = self._read_list_file(self.list_file)
 
         if class_names is None:
-            resolved_class_names = sorted({p.parent.name for p in self.sample_paths})
+            if self.infer_class_from_h5_attr:
+                self._maybe_infer_labels_from_h5_attr()
+            if self.infer_class_from_filename_prefix:
+                self._maybe_infer_labels_from_filename_prefix()
+            resolved_class_names = _sort_class_names({s.label_name for s in self.samples})
         else:
             resolved_class_names = [str(name) for name in class_names]
             if len(resolved_class_names) == 0:
@@ -177,28 +251,85 @@ class NImageNetEventsDataset(Dataset):
         if limit_classes is not None:
             resolved_class_names = resolved_class_names[:limit_classes]
             allowed = set(resolved_class_names)
-            self.sample_paths = [p for p in self.sample_paths if p.parent.name in allowed]
+            self.samples = [s for s in self.samples if s.label_name in allowed]
 
         self.class_names = list(resolved_class_names)
         self.label_map = {name: idx for idx, name in enumerate(self.class_names)}
         if limit_samples is not None:
-            self.sample_paths = self.sample_paths[:limit_samples]
+            self.samples = self.samples[:limit_samples]
 
-    def _read_list_file(self, list_file: Path) -> list[Path]:
-        paths: list[Path] = []
+    def _read_list_file(self, list_file: Path) -> list[_NImageNetSample]:
+        samples: list[_NImageNetSample] = []
         for line in list_file.read_text().splitlines():
             line = line.strip()
             if not line:
                 continue
-            raw = line.split()[0]
+            if line.startswith("#"):
+                continue
+
+            normalized = line.replace(",", " ").replace("\t", " ")
+            parts = [p for p in normalized.split() if p]
+            if len(parts) == 0:
+                continue
+
+            raw = parts[0]
             p = Path(raw)
             if not p.is_absolute():
                 if self.root_dir is not None:
                     p = self.root_dir / p
                 else:
                     p = list_file.parent / p
-            paths.append(p)
-        return paths
+            label_name = str(parts[1]) if len(parts) >= 2 else p.parent.name
+            if len(label_name.strip()) == 0:
+                label_name = p.parent.name
+            samples.append(_NImageNetSample(path=p, label_name=label_name))
+        return samples
+
+    def _maybe_infer_labels_from_h5_attr(self) -> None:
+        if len(self.samples) == 0:
+            return
+
+        unique_labels = {s.label_name for s in self.samples}
+        if len(unique_labels) > 1:
+            return
+
+        changed = 0
+        for sample in self.samples:
+            attr_label = _read_h5_class_synset(sample.path)
+            if attr_label is None:
+                continue
+            if attr_label != sample.label_name:
+                sample.label_name = attr_label
+                changed += 1
+
+        if changed > 0:
+            print(
+                f"[n_imagenet] inferred class labels from h5 attrs for "
+                f"{changed}/{len(self.samples)} samples (list={self.list_file})"
+            )
+
+    def _maybe_infer_labels_from_filename_prefix(self) -> None:
+        if len(self.samples) == 0:
+            return
+
+        unique_labels = {s.label_name for s in self.samples}
+        if len(unique_labels) > 1:
+            return
+
+        changed = 0
+        for sample in self.samples:
+            inferred = _infer_label_from_path(sample.path)
+            if inferred is None:
+                continue
+            if inferred != sample.label_name:
+                sample.label_name = inferred
+                changed += 1
+
+        if changed > 0:
+            print(
+                f"[n_imagenet] inferred class labels from filename prefixes for "
+                f"{changed}/{len(self.samples)} samples (list={self.list_file})"
+            )
 
     def _slice_events(
         self,
@@ -275,10 +406,11 @@ class NImageNetEventsDataset(Dataset):
         return x[mask], y[mask], p[mask], t[mask]
 
     def __len__(self) -> int:
-        return len(self.sample_paths)
+        return len(self.samples)
 
     def __getitem__(self, idx: int) -> dict[str, Any]:
-        event_path = self.sample_paths[idx]
+        sample_meta = self.samples[idx]
+        event_path = sample_meta.path
         x, y, p, t = _load_n_imagenet_events(
             event_path=event_path,
             compressed=self.compressed,
@@ -289,7 +421,7 @@ class NImageNetEventsDataset(Dataset):
         x, y, p, t = self._augment_events(x, y, p, t)
         x, y, p, t = self._filter_valid_coords(x, y, p, t)
 
-        label = self.label_map.get(event_path.parent.name, -1)
+        label = self.label_map.get(sample_meta.label_name, -1)
         return {
             "x": x,
             "y": y,

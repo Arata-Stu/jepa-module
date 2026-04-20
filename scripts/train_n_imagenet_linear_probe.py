@@ -145,6 +145,10 @@ def _build_n_imagenet_dataset(
         limit_samples=limit_samples,
         limit_classes=cfg.data.n_imagenet.limit_classes,
         class_names=class_names,
+        infer_class_from_h5_attr=bool(cfg.data.n_imagenet.infer_class_from_h5_attr),
+        infer_class_from_filename_prefix=bool(
+            cfg.data.n_imagenet.infer_class_from_filename_prefix
+        ),
         sensor_height=int(cfg.data.n_imagenet.sensor_height),
         sensor_width=int(cfg.data.n_imagenet.sensor_width),
         slice_enabled=slice_enabled,

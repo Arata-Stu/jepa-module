@@ -130,6 +130,7 @@ python scripts/train_n_imagenet_linear_probe.py \
 - `pretrained.encoder_key=teacher_encoder`（既定）で teacher を優先し、無ければ `encoder` へフォールバックします。
 - `model.*`（`height/width/t_bins/patch_size/tubelet_size/temporal_mix.*`）は pretrain 時と一致させてください。
 - 進捗バーは `logging.tqdm.enabled=true`（既定）で有効、無効化は `logging.tqdm.enabled=false`。
+- `train_list/val_list` は `path` だけでなく `path label`（2列目ラベル）形式も利用できます。`infer_class_from_h5_attr=true` なら H5 属性 `class_synset`、`infer_class_from_filename_prefix=true` ならファイル名先頭（例: `n01440764_xxx.h5`）からラベル推定します。
 
 ### DSEC
 
