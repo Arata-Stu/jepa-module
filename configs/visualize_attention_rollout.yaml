@@ -1,0 +1,19 @@
+defaults:
+  - train_jepa
+  - _self_
+
+pretrained:
+  checkpoint: null
+  encoder_key: teacher_encoder
+  fallback_to_encoder: true
+  strict: true
+
+visualize:
+  num_samples: 24
+  out_subdir: attention_rollout
+  weighted_sampling: true
+  overlay_alpha: 0.65
+  force_disable_sdpa: true
+  rollout:
+    discard_ratio: 0.0
+    time_reduce: mean  # mean | max | center

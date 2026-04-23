@@ -216,6 +216,21 @@ python scripts/visualize_pretrain_voxels.py \
 - `index.csv` に `source` / 元ファイル `path` / サンプル時間幅（`sample_time_span_us/sec`）/ 保存画像パスを出力します。
 - この可視化スクリプトは DataLoader を使わず dataset を直接読むため、原因切り分け時に安定です。
 
+### Attention Rollout 可視化（Encoder）
+
+```bash
+source env/bin/activate
+python scripts/visualize_attention_rollout.py \
+  pretrained.checkpoint=/absolute/path/to/pretrain/step_100000.pt \
+  data.source=pretrain_mixed
+```
+
+- 出力画像は `voxel / rollout heatmap / overlay` の横並びパネルです。
+- 出力先: `outputs/train/.../.../attention_rollout/`
+- `visualize.force_disable_sdpa=true`（既定）で、attention 重みを取得できるよう SDPA を無効化して推論します。
+- 時間方向の集約は `visualize.rollout.time_reduce=mean|max|center` で切り替えられます。
+- DSEC+Gen4 のみで使う場合は `data.pretrain_mixed.n_imagenet.enabled=false data.pretrain_mixed.weights.n_imagenet=0.0` を付けてください。
+
 ## Collapse Strategy 切り替え
 
 - `collapse_strategy=ema_stopgrad`: EMA teacher + stop-grad（デフォルト）
