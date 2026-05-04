@@ -22,6 +22,12 @@ LABEL_C="${LABEL_C:-variable}"
 OUT_SUBDIR="${OUT_SUBDIR:-_compare}"
 FPS="${FPS:-4}"
 ADD_LABELS="${ADD_LABELS:-0}" # 0|1
+STACK_MODE="${STACK_MODE:-h}" # h|v
+
+if [[ "${STACK_MODE}" != "h" && "${STACK_MODE}" != "v" ]]; then
+  echo "[ERROR] STACK_MODE must be h or v (got: ${STACK_MODE})" >&2
+  exit 1
+fi
 
 if ! command -v ffmpeg >/dev/null 2>&1; then
   echo "[ERROR] ffmpeg not found in PATH" >&2
@@ -101,6 +107,10 @@ for dpath in "${durations[@]}"; do
     in_c="${files_c[$i]}"
     base_name="$(basename "${in_a}")"
     out_img="${out_frames}/${base_name}"
+    stack_filter="hstack=inputs=3"
+    if [[ "${STACK_MODE}" == "v" ]]; then
+      stack_filter="vstack=inputs=3"
+    fi
 
     if [[ "${ADD_LABELS}" == "1" ]]; then
       ffmpeg -hide_banner -loglevel error -y \
@@ -109,12 +119,12 @@ for dpath in "${durations[@]}"; do
 [0:v]drawtext=text='${LABEL_A}':x=16:y=16:fontsize=28:fontcolor=white:box=1:boxcolor=black@0.55[v0];\
 [1:v]drawtext=text='${LABEL_B}':x=16:y=16:fontsize=28:fontcolor=white:box=1:boxcolor=black@0.55[v1];\
 [2:v]drawtext=text='${LABEL_C}':x=16:y=16:fontsize=28:fontcolor=white:box=1:boxcolor=black@0.55[v2];\
-[v0][v1][v2]hstack=inputs=3[out]" \
+[v0][v1][v2]${stack_filter}[out]" \
         -map "[out]" -frames:v 1 "${out_img}"
     else
       ffmpeg -hide_banner -loglevel error -y \
         -i "${in_a}" -i "${in_b}" -i "${in_c}" \
-        -filter_complex "[0:v][1:v][2:v]hstack=inputs=3[out]" \
+        -filter_complex "[0:v][1:v][2:v]${stack_filter}[out]" \
         -map "[out]" -frames:v 1 "${out_img}"
     fi
   done
