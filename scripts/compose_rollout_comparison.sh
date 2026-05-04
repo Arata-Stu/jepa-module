@@ -74,33 +74,33 @@ for dpath in "${durations[@]}"; do
   out_frames="${out_root}/frames"
   mkdir -p "${out_frames}"
 
-  list_a="${tmp_dir}/a_${duration}.txt"
-  list_b="${tmp_dir}/b_${duration}.txt"
-  list_c="${tmp_dir}/c_${duration}.txt"
-  list_ab="${tmp_dir}/ab_${duration}.txt"
-  list_common="${tmp_dir}/common_${duration}.txt"
+  files_a=()
+  files_b=()
+  files_c=()
+  while IFS= read -r f; do files_a+=("${f}"); done < <(find "${dir_a}" -maxdepth 1 -type f -name '*.png' | sort)
+  while IFS= read -r f; do files_b+=("${f}"); done < <(find "${dir_b}" -maxdepth 1 -type f -name '*.png' | sort)
+  while IFS= read -r f; do files_c+=("${f}"); done < <(find "${dir_c}" -maxdepth 1 -type f -name '*.png' | sort)
 
-  find "${dir_a}" -maxdepth 1 -type f -name '*.png' -exec basename {} \; | sort > "${list_a}"
-  find "${dir_b}" -maxdepth 1 -type f -name '*.png' -exec basename {} \; | sort > "${list_b}"
-  find "${dir_c}" -maxdepth 1 -type f -name '*.png' -exec basename {} \; | sort > "${list_c}"
+  n_a="${#files_a[@]}"
+  n_b="${#files_b[@]}"
+  n_c="${#files_c[@]}"
+  n_common="${n_a}"
+  if [[ "${n_b}" -lt "${n_common}" ]]; then n_common="${n_b}"; fi
+  if [[ "${n_c}" -lt "${n_common}" ]]; then n_common="${n_c}"; fi
 
-  comm -12 "${list_a}" "${list_b}" > "${list_ab}" || true
-  comm -12 "${list_ab}" "${list_c}" > "${list_common}" || true
-
-  num_common="$(grep -cve '^[[:space:]]*$' "${list_common}" || true)"
-  if [[ "${num_common}" -lt 1 ]]; then
-    echo "[WARN] no common frames for duration=${duration}"
+  if [[ "${n_common}" -lt 1 ]]; then
+    echo "[WARN] no frames for duration=${duration} (a=${n_a}, b=${n_b}, c=${n_c})"
     continue
   fi
 
-  echo "[INFO] duration=${duration} common_frames=${num_common}"
+  echo "[INFO] duration=${duration} paired_frames=${n_common} (a=${n_a}, b=${n_b}, c=${n_c})"
 
-  while IFS= read -r name; do
-    [[ -z "${name}" ]] && continue
-    in_a="${dir_a}/${name}"
-    in_b="${dir_b}/${name}"
-    in_c="${dir_c}/${name}"
-    out_img="${out_frames}/${name}"
+  for ((i=0; i<n_common; i++)); do
+    in_a="${files_a[$i]}"
+    in_b="${files_b[$i]}"
+    in_c="${files_c[$i]}"
+    base_name="$(basename "${in_a}")"
+    out_img="${out_frames}/${base_name}"
 
     if [[ "${ADD_LABELS}" == "1" ]]; then
       ffmpeg -hide_banner -loglevel error -y \
@@ -117,7 +117,7 @@ for dpath in "${durations[@]}"; do
         -filter_complex "[0:v][1:v][2:v]hstack=inputs=3[out]" \
         -map "[out]" -frames:v 1 "${out_img}"
     fi
-  done < "${list_common}"
+  done
 
   out_video="${out_root}/comparison_${duration}.mp4"
   ffmpeg -hide_banner -loglevel error -y \
