@@ -15,13 +15,14 @@ PYTHON_BIN="${PYTHON_BIN:-python}"
 # Data/source settings
 SOURCE_NAME="${SOURCE_NAME:-gen4}"               # gen4 or dsec
 SOURCE_ROOT_DIR="${SOURCE_ROOT_DIR:-/mnt/data/arata/gen4-downsampled}"
-SOURCE_SPLIT="${SOURCE_SPLIT:-train}"
+SOURCE_SPLIT="${SOURCE_SPLIT:-}"
+SOURCE_SPLITS="${SOURCE_SPLITS:-${SOURCE_SPLIT:-train}}" # e.g. "train" or "train,val"
 SOURCE_FILE_GLOB="${SOURCE_FILE_GLOB:-*_4x.h5}" # for gen4 default
 
 # Scene-set settings
 NUM_SCENES="${NUM_SCENES:-32}"
 MANIFEST_PATH="${MANIFEST_PATH:-/tmp/attention_eval_${SOURCE_NAME}_${NUM_SCENES}.txt}"
-REBUILD_MANIFEST="${REBUILD_MANIFEST:-1}"        # 1: rebuild from SOURCE_ROOT_DIR/SOURCE_SPLIT
+REBUILD_MANIFEST="${REBUILD_MANIFEST:-auto}"     # auto|1|0
 
 # Visualization settings
 NUM_SAMPLES="${NUM_SAMPLES:-32}"
@@ -40,13 +41,53 @@ MODELS=(
   "variable|${CKPT_VARIABLE}|true"
 )
 
+manifest_exists="0"
+if [[ -f "${MANIFEST_PATH}" ]]; then
+  manifest_exists="1"
+fi
+
+if [[ -z "${SOURCE_SPLITS}" ]]; then
+  echo "[ERROR] SOURCE_SPLITS must be non-empty (e.g. SOURCE_SPLITS=train or SOURCE_SPLITS=train,val)" >&2
+  exit 1
+fi
+
+should_rebuild="0"
 if [[ "${REBUILD_MANIFEST}" == "1" ]]; then
-  split_dir="${SOURCE_ROOT_DIR%/}/${SOURCE_SPLIT}"
-  if [[ ! -d "${split_dir}" ]]; then
-    echo "[ERROR] split directory not found: ${split_dir}" >&2
+  should_rebuild="1"
+elif [[ "${REBUILD_MANIFEST}" == "auto" && "${manifest_exists}" == "0" ]]; then
+  should_rebuild="1"
+fi
+
+if [[ "${should_rebuild}" == "1" ]]; then
+  IFS=',' read -r -a split_list <<< "${SOURCE_SPLITS}"
+  tmp_all="$(mktemp /tmp/attention_eval_all.XXXXXX)"
+  : > "${tmp_all}"
+  valid_split_count=0
+
+  for split in "${split_list[@]}"; do
+    split_trimmed="$(echo "${split}" | xargs)"
+    [[ -z "${split_trimmed}" ]] && continue
+    split_dir="${SOURCE_ROOT_DIR%/}/${split_trimmed}"
+    if [[ ! -d "${split_dir}" ]]; then
+      echo "[WARN] split directory not found, skip: ${split_dir}" >&2
+      continue
+    fi
+    valid_split_count=$((valid_split_count + 1))
+    echo "[INFO] rebuilding manifest from ${split_dir} (glob=${SOURCE_FILE_GLOB})"
+    find "${split_dir}" -type f -name "${SOURCE_FILE_GLOB}" >> "${tmp_all}"
+  done
+
+  if [[ "${valid_split_count}" -lt 1 ]]; then
+    rm -f "${tmp_all}"
+    echo "[ERROR] no valid split directories under root=${SOURCE_ROOT_DIR} for SOURCE_SPLITS=${SOURCE_SPLITS}" >&2
+    echo "[HINT] set SOURCE_ROOT_DIR/SOURCE_SPLITS correctly, or set REBUILD_MANIFEST=0 with MANIFEST_PATH=<existing_manifest>" >&2
     exit 1
   fi
-  find "${split_dir}" -type f -name "${SOURCE_FILE_GLOB}" | sort | head -n "${NUM_SCENES}" > "${MANIFEST_PATH}"
+
+  tmp_sorted="$(mktemp /tmp/attention_eval_sorted.XXXXXX)"
+  sort -u "${tmp_all}" > "${tmp_sorted}"
+  sed -n "1,${NUM_SCENES}p" "${tmp_sorted}" > "${MANIFEST_PATH}"
+  rm -f "${tmp_all}" "${tmp_sorted}"
 fi
 
 if [[ ! -f "${MANIFEST_PATH}" ]]; then
@@ -60,10 +101,12 @@ if [[ "${scene_count}" -lt 1 ]]; then
   exit 1
 fi
 
-echo "[INFO] source=${SOURCE_NAME} root=${SOURCE_ROOT_DIR} split=${SOURCE_SPLIT}"
+echo "[INFO] source=${SOURCE_NAME} root=${SOURCE_ROOT_DIR} splits=${SOURCE_SPLITS}"
 echo "[INFO] manifest=${MANIFEST_PATH} scenes=${scene_count}"
 echo "[INFO] durations_ms=${DURATIONS_MS[*]}"
 echo "[INFO] out_base=${OUT_BASE}"
+
+splits_override=("data.pretrain_mixed.${SOURCE_NAME}.splits=[${SOURCE_SPLITS}]")
 
 for model in "${MODELS[@]}"; do
   IFS="|" read -r model_name ckpt tmix <<< "${model}"
@@ -85,6 +128,7 @@ for model in "${MODELS[@]}"; do
       data.pretrain_mixed.${SOURCE_NAME}.enabled=true \
       data.pretrain_mixed.${SOURCE_NAME}.root_dir="${SOURCE_ROOT_DIR}" \
       data.pretrain_mixed.${SOURCE_NAME}.manifest_file="${MANIFEST_PATH}" \
+      "${splits_override[@]}" \
       data.pretrain_mixed.weights.gen4=0.0 \
       data.pretrain_mixed.weights.dsec=0.0 \
       data.pretrain_mixed.weights.n_imagenet=0.0 \
